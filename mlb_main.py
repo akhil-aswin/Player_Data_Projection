@@ -1,0 +1,603 @@
+"""
+MLB player prop pipeline.
+Pulls game logs from the MLB Stats API, builds a recency-weighted projection
+adjusted for opponent context, fetches live odds from The Odds API,
+de-vigs them, and outputs an edge estimate.
+"""
+
+import math
+import statsapi
+from scipy.stats import poisson, norm
+
+from config import MLB_SPORT_KEY, MLB_CURRENT_SEASON, MLB_RECENT_SEASONS
+from data.mlb_stats import (
+    get_recent_games, get_player_id, get_starts_vs_team,
+    weighted_recent_average, pitcher_weighted_average,
+)
+from data.mlb_matchups import (
+    get_team_k_factor,
+    get_lineup_k_factor,
+    get_pitcher_vs_lineup,
+)
+from data.odds_client import OddsAPIClient
+from analysis.devig import consensus_fair_probability
+
+BATTER_STAT_MAP = {
+    "hits": "hits",
+    "h": "hits",
+    "home runs": "homeRuns",
+    "hr": "homeRuns",
+    "rbi": "rbi",
+    "rbis": "rbi",
+    "runs": "runs",
+    "r": "runs",
+    "total bases": "totalBases",
+    "tb": "totalBases",
+    "strikeouts": "strikeOuts",
+    "k": "strikeOuts",
+    "stolen bases": "stolenBases",
+    "sb": "stolenBases",
+}
+
+PITCHER_STAT_MAP = {
+    "strikeouts": "strikeOuts",
+    "k": "strikeOuts",
+    "hits allowed": "hits",
+    "earned runs": "earnedRuns",
+    "er": "earnedRuns",
+    "walks": "baseOnBalls",
+    "bb": "baseOnBalls",
+}
+
+ODDS_MARKET_MAP = {
+    "hits":        "batter_hits",
+    "homeRuns":    "batter_home_runs",
+    "rbi":         "batter_rbis",
+    "runs":        "batter_runs_scored",
+    "totalBases":  "batter_total_bases",
+    "stolenBases": "batter_stolen_bases",
+    "earnedRuns":  "pitcher_earned_runs",
+    "baseOnBalls": "pitcher_walks",
+}
+
+MIN_STD = {
+    "hits": 0.8, "homeRuns": 0.3, "rbi": 0.8, "runs": 0.7,
+    "totalBases": 1.0, "stolenBases": 0.4, "strikeOuts": 1.5,
+    "earnedRuns": 1.2, "baseOnBalls": 0.8,
+}
+
+
+def _is_whole_number(line: float) -> bool:
+    return line == math.floor(line)
+
+
+def compute_probs(mean: float, std: float, line: float,
+                  use_poisson: bool = False) -> dict:
+    """
+    Returns P(over), P(push), P(under) for a given line.
+
+    Push is only possible on whole-number lines (5.0, 4.0) with Poisson —
+    a discrete count can land exactly on the line. Half-point lines (4.5, 5.5)
+    can never push, so P(push) = 0.
+
+    Effective win rate accounts for push: P(over) / (P(over) + P(under)).
+    This is what to compare against the 50% PrizePicks implied, not raw P(over).
+    """
+    if use_poisson:
+        k = math.floor(line)
+        p_over = 1 - poisson.cdf(k, mu=mean)          # P(X >= k+1)
+        if _is_whole_number(line):
+            p_push = float(poisson.pmf(k, mu=mean))    # P(X = k)
+            p_over = 1 - poisson.cdf(k, mu=mean) - p_push  # P(X > k) = P(X >= k+1)
+            # re-derive cleanly
+            p_over = float(1 - poisson.cdf(int(line), mu=mean))   # P(X >= line+1)
+            p_push = float(poisson.pmf(int(line), mu=mean))        # P(X = line)
+            p_under = float(poisson.cdf(int(line) - 1, mu=mean))  # P(X <= line-1)
+        else:
+            p_push = 0.0
+            p_over = float(1 - poisson.cdf(k, mu=mean))
+            p_under = float(poisson.cdf(k, mu=mean))
+    else:
+        p_push = 0.0
+        if std == 0:
+            p_over = 1.0 if mean > line else 0.0
+        else:
+            p_over = float(1 - norm.cdf(line, loc=mean, scale=std))
+        p_under = 1.0 - p_over
+
+    decisive = p_over + p_under  # excludes push
+    effective_over_rate = p_over / decisive if decisive > 0 else 0.5
+
+    return {
+        "p_over": round(p_over, 4),
+        "p_push": round(p_push, 4),
+        "p_under": round(p_under, 4),
+        "effective_over_rate": round(effective_over_rate, 4),
+    }
+
+
+def model_prob_over(mean: float, std: float, line: float,
+                    use_poisson: bool = False) -> float:
+    """Convenience wrapper — returns raw P(over) for sportsbook comparisons."""
+    return compute_probs(mean, std, line, use_poisson)["p_over"]
+
+
+def _build_projection(player_name: str, opponent: str,
+                      stat_col: str, group: str, fast: bool = False) -> tuple:
+    """
+    Shared projection logic used by both find_edge and prizepicks_edge.
+    Returns (final_mean, base_mean, base_stats, adjustments, data_source).
+    """
+    game_log, data_source = get_recent_games(player_name, n=15, group=group)
+
+    if group == "pitching":
+        base_stats = pitcher_weighted_average(game_log, stat_col)
+    else:
+        base_stats = weighted_recent_average(game_log, stat_col, halflife_games=7)
+
+    base_mean = base_stats["mean"]
+    adjustments = []
+
+    # Show each start's weight so the user can sanity-check
+    for line in base_stats.get("start_breakdown", []):
+        adjustments.append(f"[data] {line}")
+    for note in base_stats.get("pitch_count_adjustments", []):
+        adjustments.append(f"[pitch-count adj] {note}")
+
+    vs_team = get_starts_vs_team(player_name, opponent, MLB_RECENT_SEASONS[:2], group=group)
+    if not vs_team.empty:
+        vs_stats = weighted_recent_average(vs_team, stat_col, halflife_games=4)
+        n = len(vs_team)
+        history_weight = min(n / (n + 6), 0.35)
+        blended_mean = (1 - history_weight) * base_mean + history_weight * vs_stats["mean"]
+        adjustments.append(
+            f"vs {opponent} history ({n} start{'s' if n > 1 else ''}, last 2 seasons): "
+            f"avg {vs_stats['mean']:.1f} — weight {history_weight:.2f} → {blended_mean:.2f}"
+        )
+    else:
+        blended_mean = base_mean
+        adjustments.append(f"vs {opponent} history: no starts found in last 2 seasons")
+
+    if group == "pitching" and stat_col == "strikeOuts" and not fast:
+        pitcher_id = get_player_id(player_name)
+        pvb_factor, pvb_detail = get_pitcher_vs_lineup(pitcher_id, opponent, MLB_RECENT_SEASONS)
+
+        lineup_factor, lineup_detail = get_lineup_k_factor(opponent, MLB_CURRENT_SEASON)
+
+        # When both pvb and lineup are available they measure correlated things:
+        # lineup captures batter quality vs all pitchers; pvb captures pitcher-specific
+        # history vs those same batters. Applying both at full strength double-stacks.
+        # Halve pvb's pull toward 1.0 when lineup is posted so it contributes
+        # additional signal without compounding aggressively.
+        if lineup_factor != 1.0 and pvb_factor != 1.0:
+            pvb_factor_applied = 1.0 + (pvb_factor - 1.0) * 0.5
+            adjustments.append(
+                f"pitcher-vs-batter: {pvb_detail}\n"
+                f"    [halved to ×{pvb_factor_applied:.3f} since lineup K% also applied]"
+            )
+        else:
+            pvb_factor_applied = pvb_factor
+            adjustments.append(f"pitcher-vs-batter: {pvb_detail}")
+
+        blended_mean *= pvb_factor_applied
+        blended_mean *= lineup_factor
+        adjustments.append(f"lineup K%: {lineup_detail}")
+
+        team_factor, team_detail = get_team_k_factor(opponent, MLB_CURRENT_SEASON)
+        if lineup_factor == 1.0:
+            blended_mean *= team_factor
+            adjustments.append(f"team K% (lineup unavailable): {team_detail}")
+        else:
+            adjustments.append(f"team K% (skipped — lineup factor used): {team_detail}")
+    elif group == "pitching" and stat_col == "strikeOuts" and fast:
+        team_factor, team_detail = get_team_k_factor(opponent, MLB_CURRENT_SEASON)
+        blended_mean *= team_factor
+        adjustments.append(f"team K% (fast mode): {team_detail}")
+
+    return blended_mean, base_mean, base_stats, adjustments, data_source
+
+
+def prizepicks_edge(player_name: str, opponent: str, pp_line: float,
+                    stat_col: str, event_id: str, group: str = "hitting") -> dict:
+    """
+    PrizePicks comparison. Pulls sportsbook odds for the true market probability,
+    then separately evaluates the model at the PrizePicks line vs 50% implied.
+    """
+    final_mean, base_mean, base_stats, adjustments, data_source = \
+        _build_projection(player_name, opponent, stat_col, group)
+
+    use_poisson = group == "pitching" and stat_col == "strikeOuts"
+    effective_std = max(base_stats["std"], MIN_STD.get(stat_col, 1.0))
+
+    # Sportsbook market probability
+    if stat_col == "strikeOuts":
+        market = "pitcher_strikeouts" if group == "pitching" else "batter_strikeouts"
+    else:
+        market = ODDS_MARKET_MAP.get(stat_col)
+        if not market:
+            raise ValueError(f"No Odds API market mapped for stat '{stat_col}'")
+
+    client = OddsAPIClient()
+    props = client.get_player_props(event_id, markets=[market], sport=MLB_SPORT_KEY)
+    book_lines = client.extract_player_lines(props, player_name, market)
+    if not book_lines:
+        raise ValueError(f"No odds found for {player_name} in market '{market}'")
+
+    market_data = consensus_fair_probability(book_lines)
+    book_line = market_data["consensus_line"]
+    market_fair_prob = market_data["fair_prob_over"]
+    book_probs = compute_probs(final_mean, effective_std, book_line, use_poisson=use_poisson)
+
+    # PrizePicks probabilities — push is possible on whole-number lines
+    pp_probs = compute_probs(final_mean, effective_std, pp_line, use_poisson=use_poisson)
+    pp_edge = round((pp_probs["effective_over_rate"] - 0.5) * 100, 1)
+
+    return {
+        "player": player_name,
+        "opponent": opponent,
+        "stat": stat_col,
+        "book_line": book_line,
+        "pp_line": pp_line,
+        "base_projection": round(base_mean, 2),
+        "adjusted_projection": round(final_mean, 2),
+        # sportsbook
+        "model_prob_at_book_line": book_probs["p_over"],
+        "market_fair_prob_over": round(market_fair_prob, 3),
+        "market_edge_pp": round((book_probs["p_over"] - market_fair_prob) * 100, 1),
+        # prizepicks
+        "pp_p_over": pp_probs["p_over"],
+        "pp_p_push": pp_probs["p_push"],
+        "pp_p_under": pp_probs["p_under"],
+        "pp_effective_over_rate": pp_probs["effective_over_rate"],
+        "pp_edge_pp": pp_edge,
+        "pp_has_push": _is_whole_number(pp_line),
+        # meta
+        "market_vig_pct": round(market_data["avg_vig_pct"], 1),
+        "n_books": market_data["n_books"],
+        "games_used": base_stats["n_games"],
+        "data_source": data_source,
+        "adjustments": adjustments,
+        "distribution": "Poisson" if use_poisson else "Normal",
+    }
+
+
+def find_edge(player_name: str, opponent: str, event_id: str,
+              stat_col: str, group: str = "hitting") -> dict:
+    """
+    Full pipeline: project stat (with opponent adjustments) -> fetch odds -> edge.
+    group='hitting' for batters, group='pitching' for pitchers.
+    """
+    final_mean, base_mean, base_stats, adjustments, data_source = \
+        _build_projection(player_name, opponent, stat_col, group)
+
+    use_poisson = group == "pitching" and stat_col == "strikeOuts"
+    effective_std = max(base_stats["std"], MIN_STD.get(stat_col, 1.0))
+
+    # --- Odds ---
+    if stat_col == "strikeOuts":
+        market = "pitcher_strikeouts" if group == "pitching" else "batter_strikeouts"
+    else:
+        market = ODDS_MARKET_MAP.get(stat_col)
+        if not market:
+            raise ValueError(f"No Odds API market mapped for stat '{stat_col}'")
+
+    client = OddsAPIClient()
+    props = client.get_player_props(event_id, markets=[market], sport=MLB_SPORT_KEY)
+    book_lines = client.extract_player_lines(props, player_name, market)
+    if not book_lines:
+        raise ValueError(f"No odds found for {player_name} in market '{market}'")
+
+    market_data = consensus_fair_probability(book_lines)
+    line = market_data["consensus_line"]
+
+    model_p_over = model_prob_over(final_mean, effective_std, line, use_poisson=use_poisson)
+    market_p_over = market_data["fair_prob_over"]
+
+    return {
+        "player": player_name,
+        "opponent": opponent,
+        "stat": stat_col,
+        "line": line,
+        "base_projection": round(base_mean, 2),
+        "adjusted_projection": round(final_mean, 2),
+        "model_prob_over": round(model_p_over, 3),
+        "market_fair_prob_over": round(market_p_over, 3),
+        "edge_pct_pts": round((model_p_over - market_p_over) * 100, 1),
+        "market_vig_pct": round(market_data["avg_vig_pct"], 1),
+        "n_books": market_data["n_books"],
+        "games_used": base_stats["n_games"],
+        "data_source": data_source,
+        "adjustments": adjustments,
+        "distribution": "Poisson" if use_poisson else "Normal",
+    }
+
+
+def _print_result(result: dict) -> None:
+    print(f"  Player:               {result['player']} vs {result['opponent']}")
+    print(f"  Stat:                 {result['stat']}")
+    print(f"  Base projection:      {result['base_projection']}  ({result['games_used']} starts, {result['data_source']})")
+    print(f"  Adjusted projection:  {result['adjusted_projection']}  ({result['distribution']})")
+    print()
+    print("  Adjustments applied:")
+    for adj in result["adjustments"]:
+        print(f"    • {adj}")
+    print()
+
+    if "pp_line" in result:
+        print(f"  ── Sportsbook (line {result['book_line']}, {result['n_books']} books, vig {result['market_vig_pct']}%) ──")
+        print(f"  Model prob over:   {result['model_prob_at_book_line']*100:.1f}%")
+        print(f"  Market fair prob:  {result['market_fair_prob_over']*100:.1f}%")
+        book_lean = "OVER" if result["market_edge_pp"] > 0 else "UNDER"
+        print(f"  Edge vs market:    {result['market_edge_pp']:+.1f} pp  → lean {book_lean}")
+        print()
+        push_note = " (push possible — whole number line)" if result["pp_has_push"] else ""
+        print(f"  ── PrizePicks (line {result['pp_line']}{push_note}) ──")
+        print(f"  P(over):           {result['pp_p_over']*100:.1f}%")
+        if result["pp_has_push"]:
+            print(f"  P(push):           {result['pp_p_push']*100:.1f}%  ← money back")
+        print(f"  P(under):          {result['pp_p_under']*100:.1f}%")
+        if result["pp_has_push"]:
+            print(f"  Effective over %:  {result['pp_effective_over_rate']*100:.1f}%  (excl. push)")
+        print(f"  PP implied:        50.0%")
+        pp_lean = "OVER" if result["pp_edge_pp"] > 0 else "UNDER"
+        print(f"  Edge vs PP:        {result['pp_edge_pp']:+.1f} pp  → lean {pp_lean}")
+    else:
+        # Standard sportsbook result
+        print(f"  Line:              {result['line']}")
+        print(f"  Model prob over:   {result['model_prob_over']*100:.1f}%")
+        print(f"  Market fair prob:  {result['market_fair_prob_over']*100:.1f}%  ({result['n_books']} books, vig {result['market_vig_pct']}%)")
+        lean = "OVER" if result["edge_pct_pts"] > 0 else "UNDER"
+        print(f"  Edge:              {result['edge_pct_pts']:+.1f} pp  → lean {lean}")
+
+
+def _build_pitcher_opponent_map() -> dict:
+    """
+    Pulls today's MLB schedule from statsapi and returns a dict mapping
+    lowercase pitcher name → opponent team name (as statsapi reports it).
+
+    Home pitchers face the away team; away pitchers face the home team.
+    Only probable starters are included — blank entries are skipped.
+    """
+    from datetime import date
+    today = date.today().strftime("%m/%d/%Y")
+    try:
+        games = statsapi.schedule(date=today, sportId=1)
+    except Exception:
+        return {}
+
+    mapping: dict = {}
+    for game in games:
+        home = game.get("home_name", "")
+        away = game.get("away_name", "")
+        home_pitcher = game.get("home_probable_pitcher", "").strip()
+        away_pitcher = game.get("away_probable_pitcher", "").strip()
+        if home_pitcher:
+            mapping[home_pitcher.lower()] = away
+        if away_pitcher:
+            mapping[away_pitcher.lower()] = home
+    return mapping
+
+
+def _resolve_opponent(player_name: str, schedule_map: dict,
+                      home_team: str, away_team: str) -> str | None:
+    """
+    Returns the opponent team name for a pitcher, or None if it can't be resolved.
+    Tries the statsapi schedule first (exact, then last-name match), then falls
+    back to a currentTeam lookup against the event's home/away teams.
+    """
+    name_lower = player_name.lower().strip()
+
+    # Exact match against schedule
+    if name_lower in schedule_map:
+        return schedule_map[name_lower]
+
+    # Last-name match against schedule (handles middle initials, accents, etc.)
+    last_name = name_lower.split()[-1]
+    for sched_name, opponent in schedule_map.items():
+        if sched_name.split()[-1] == last_name:
+            return opponent
+
+    # Fall back to statsapi currentTeam (guarded against empty-string bug)
+    try:
+        matches = statsapi.lookup_player(player_name)
+        if matches:
+            current_team = matches[0].get("currentTeam", {}).get("name", "").strip()
+            if current_team:
+                home_l = home_team.lower()
+                away_l = away_team.lower()
+                ct_l = current_team.lower()
+                if ct_l in home_l or home_l in ct_l:
+                    return away_team
+                if ct_l in away_l or away_l in ct_l:
+                    return home_team
+    except Exception:
+        pass
+
+    return None
+
+
+def batch_scan(stat_col: str = "strikeOuts", group: str = "pitching",
+               pp_assume_round: bool = True) -> list:
+    """
+    Scans all today's MLB games for pitcher_strikeouts props, runs projections
+    for every listed pitcher, and returns results sorted by absolute market edge.
+
+    fast=True is used internally — lineup and pitcher-vs-batter matchup calls are
+    skipped since lineups aren't posted at scan time. Team K% is still applied.
+    """
+    market = "pitcher_strikeouts" if group == "pitching" else "batter_strikeouts"
+    client = OddsAPIClient()
+
+    print("Fetching upcoming MLB events...")
+    events = client.get_upcoming_events(sport=MLB_SPORT_KEY)
+    if not events:
+        print("No upcoming MLB events found on this API plan.")
+        return []
+
+    print(f"  {len(events)} events found. Pulling {market} props...\n")
+
+    # Collect all pitcher props grouped by player across all events
+    all_players: dict = {}  # player_name -> {event_id, home_team, away_team, book_lines, props}
+
+    for event in events:
+        eid = event["id"]
+        home = event["home_team"]
+        away = event["away_team"]
+        try:
+            props = client.get_player_props(eid, markets=[market], sport=MLB_SPORT_KEY)
+        except Exception as e:
+            print(f"  [{home} vs {away}] props fetch error: {e}")
+            continue
+
+        # Collect all player names that appear in any bookmaker's markets
+        players_in_event: set = set()
+        for bookmaker in props.get("bookmakers", []):
+            for m in bookmaker.get("markets", []):
+                if m["key"] != market:
+                    continue
+                for outcome in m["outcomes"]:
+                    name = outcome.get("description", "").strip()
+                    if name:
+                        players_in_event.add(name)
+
+        for player_name in players_in_event:
+            book_lines = client.extract_player_lines(props, player_name, market)
+            if book_lines:
+                all_players[player_name] = {
+                    "event_id": eid,
+                    "home_team": home,
+                    "away_team": away,
+                    "book_lines": book_lines,
+                }
+
+    if not all_players:
+        print("No pitcher strikeout props found for today's games.")
+        return []
+
+    print("  Building today's probable starter map from MLB schedule...")
+    schedule_map = _build_pitcher_opponent_map()
+    print(f"  {len(schedule_map)} probable starters found in schedule.\n")
+
+    print(f"  {len(all_players)} pitchers listed. Running projections (fast mode)...\n")
+
+    results = []
+
+    for player_name, event_data in all_players.items():
+        opponent = _resolve_opponent(
+            player_name, schedule_map,
+            event_data["home_team"], event_data["away_team"],
+        )
+        if opponent is None:
+            print(f"  [{player_name}] could not resolve opponent — skipping")
+            continue
+
+        # Run projection
+        try:
+            final_mean, base_mean, base_stats, adjustments, _ = \
+                _build_projection(player_name, opponent, stat_col, group, fast=True)
+        except Exception as e:
+            print(f"  [{player_name}] projection error: {e} — skipping")
+            continue
+
+        # Market edge
+        market_data = consensus_fair_probability(event_data["book_lines"])
+        book_line = market_data["consensus_line"]
+        market_fair_prob = market_data["fair_prob_over"]
+        use_poisson = group == "pitching" and stat_col == "strikeOuts"
+        effective_std = max(base_stats["std"], MIN_STD.get(stat_col, 1.0))
+
+        book_probs = compute_probs(final_mean, effective_std, book_line, use_poisson=use_poisson)
+        model_p_over = book_probs["p_over"]
+        market_edge = round((model_p_over - market_fair_prob) * 100, 1)
+
+        # PrizePicks edge — round book line to nearest whole number
+        pp_line = round(book_line) if pp_assume_round else book_line
+        pp_probs = compute_probs(final_mean, effective_std, pp_line, use_poisson=use_poisson)
+        pp_edge = round((pp_probs["effective_over_rate"] - 0.5) * 100, 1)
+        lean = "OVER" if market_edge > 0 else "UNDER"
+
+        results.append({
+            "player": player_name,
+            "opponent": opponent,
+            "line": book_line,
+            "pp_line": pp_line,
+            "projection": round(final_mean, 2),
+            "model_prob_over": round(model_p_over, 3),
+            "market_fair_prob": round(market_fair_prob, 3),
+            "market_edge": market_edge,
+            "pp_effective_over_rate": round(pp_probs["effective_over_rate"], 3),
+            "pp_edge": pp_edge,
+            "abs_market_edge": abs(market_edge),
+            "n_books": market_data["n_books"],
+            "games_used": base_stats["n_games"],
+            "lean": lean,
+            "adjustments": adjustments,
+        })
+
+    # Sort by absolute market edge, highest first
+    results.sort(key=lambda x: x["abs_market_edge"], reverse=True)
+
+    # Print ranked table
+    print()
+    print("  ── RANKED BY EDGE (highest first) ──\n")
+    print(f"  {'#':<3} {'Player':<25} {'vs':<22} {'Line':>5}  {'Proj':>5}  {'Mdl%':>6}  {'Mkt%':>6}  {'Edge':>7}  {'PP':>4}  {'Eff%':>6}  {'PP Edge':>8}  {'Lean'}")
+    print(f"  {'-'*3} {'-'*25} {'-'*22} {'-'*5}  {'-'*5}  {'-'*6}  {'-'*6}  {'-'*7}  {'-'*4}  {'-'*6}  {'-'*8}  {'-'*6}")
+    for i, r in enumerate(results, 1):
+        edge_str = f"{r['market_edge']:+.1f} pp"
+        pp_edge_str = f"{r['pp_edge']:+.1f} pp"
+        print(
+            f"  {i:<3} {r['player']:<25} {r['opponent']:<22} {r['line']:>5.1f}  "
+            f"{r['projection']:>5.2f}  {r['model_prob_over']*100:>5.1f}%  "
+            f"{r['market_fair_prob']*100:>5.1f}%  {edge_str:>8}  "
+            f"{r['pp_line']:>4.0f}  {r['pp_effective_over_rate']*100:>5.1f}%  "
+            f"{pp_edge_str:>8}  {r['lean']}"
+        )
+
+    print(f"\n  Total: {len(results)} pitchers scanned across {len(events)} games")
+    return results
+
+
+if __name__ == "__main__":
+    print("\n=== MLB Player Prop Projector ===\n")
+    mode = input("Mode [single / batch] (default: single): ").strip().lower() or "single"
+
+    if mode == "batch":
+        print("\nBatch scan: pitcher strikeouts for all today's games\n")
+        batch_scan(stat_col="strikeOuts", group="pitching", pp_assume_round=True)
+        exit(0)
+
+    player = input("Player full name (e.g. Colin Rea): ").strip()
+    opponent = input("Opponent team (e.g. Cubs or Chicago Cubs): ").strip()
+    role = input("Role [batter / pitcher] (default: batter): ").strip().lower() or "batter"
+    group = "pitching" if role == "pitcher" else "hitting"
+
+    stat_map = PITCHER_STAT_MAP if group == "pitching" else BATTER_STAT_MAP
+    stat_options = " / ".join(sorted(set(stat_map.keys())))
+    stat = input(f"Stat [{stat_options}]: ").strip().lower()
+    stat_col = stat_map.get(stat)
+    if not stat_col:
+        print(f"Unknown stat '{stat}'. Valid: {stat_options}")
+        exit(1)
+
+    source = input("Source [sportsbook / prizepicks] (default: sportsbook): ").strip().lower() or "sportsbook"
+
+    client = OddsAPIClient()
+    print("\nFetching upcoming MLB events...\n")
+    events = client.get_upcoming_events(sport=MLB_SPORT_KEY)
+    if not events:
+        print("No upcoming MLB events found on this API plan.")
+        exit(1)
+    for e in events[:20]:
+        print(f"  {e['id']}  |  {e['home_team']} vs {e['away_team']}  |  {e['commence_time']}")
+    print()
+    event_id = input("Event ID: ").strip()
+
+    print(f"\nFetching data for {player} vs {opponent}...\n")
+
+    if source == "prizepicks":
+        pp_line = float(input("PrizePicks line (e.g. 4.0): ").strip())
+        result = prizepicks_edge(player, opponent, pp_line, stat_col, event_id, group=group)
+    else:
+        result = find_edge(player, opponent, event_id, stat_col, group=group)
+
+    _print_result(result)

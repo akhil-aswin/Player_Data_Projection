@@ -1,0 +1,7 @@
+nba_api>=1.4.1
+MLB-StatsAPI>=1.7.2
+requests>=2.31.0
+pandas>=2.0.0
+numpy>=1.24.0
+scipy>=1.10.0
+python-dotenv>=1.0.0
