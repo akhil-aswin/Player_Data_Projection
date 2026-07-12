@@ -7,12 +7,15 @@ de-vigs them, and outputs an edge estimate.
 
 import math
 import statsapi
+import requests as _requests
 from scipy.stats import poisson, norm
 
 from config import MLB_SPORT_KEY, MLB_CURRENT_SEASON, MLB_RECENT_SEASONS
 from data.mlb_stats import (
     get_recent_games, get_player_id, get_starts_vs_team,
     weighted_recent_average, pitcher_weighted_average,
+    get_opposing_starter, get_batter_vs_pitcher, get_batter_game_info,
+    add_derived_stats,
 )
 from data.mlb_matchups import (
     get_team_k_factor,
@@ -58,12 +61,22 @@ ODDS_MARKET_MAP = {
     "stolenBases": "batter_stolen_bases",
     "earnedRuns":  "pitcher_earned_runs",
     "baseOnBalls": "pitcher_walks",
+    "hitsRunsRbi": "batter_hits_runs_rbis",
 }
 
 MIN_STD = {
     "hits": 0.8, "homeRuns": 0.3, "rbi": 0.8, "runs": 0.7,
     "totalBases": 1.0, "stolenBases": 0.4, "strikeOuts": 1.5,
-    "earnedRuns": 1.2, "baseOnBalls": 0.8,
+    "earnedRuns": 1.2, "baseOnBalls": 0.8, "hitsRunsRbi": 1.5,
+}
+
+# All integer-count stats benefit from Poisson instead of Normal distribution.
+# Normal overestimates/underestimates probability near half-point lines for
+# discrete right-skewed stats (e.g. total bases: most games 0–1, spikes to 3–4).
+POISSON_STATS = {
+    "strikeOuts", "hits", "homeRuns", "totalBases",
+    "rbi", "runs", "stolenBases", "baseOnBalls", "earnedRuns",
+    "hitsRunsRbi",
 }
 
 
@@ -128,35 +141,107 @@ def _build_projection(player_name: str, opponent: str,
     Shared projection logic used by both find_edge and prizepicks_edge.
     Returns (final_mean, base_mean, base_stats, adjustments, data_source).
     """
-    game_log, data_source = get_recent_games(player_name, n=15, group=group)
+    n_games = 15 if group == "pitching" else 20
+    game_log, data_source = get_recent_games(player_name, n=n_games, group=group)
+    game_log = add_derived_stats(game_log, stat_col)
 
     if group == "pitching":
         base_stats = pitcher_weighted_average(game_log, stat_col)
     else:
-        base_stats = weighted_recent_average(game_log, stat_col, halflife_games=7)
+        base_stats = weighted_recent_average(game_log, stat_col)
 
     base_mean = base_stats["mean"]
     adjustments = []
 
-    # Show each start's weight so the user can sanity-check
-    for line in base_stats.get("start_breakdown", []):
-        adjustments.append(f"[data] {line}")
+    # IP / ERA context (pitchers only)
+    if base_stats.get("ip_context"):
+        adjustments.append(f"[IP] {base_stats['ip_context']}")
+    if base_stats.get("era_context"):
+        adjustments.append(f"[ERA] {base_stats['era_context']}")
     for note in base_stats.get("pitch_count_adjustments", []):
         adjustments.append(f"[pitch-count adj] {note}")
+    # Per-start breakdown
+    for line in base_stats.get("start_breakdown", []):
+        adjustments.append(f"[data] {line}")
 
-    vs_team = get_starts_vs_team(player_name, opponent, MLB_RECENT_SEASONS[:2], group=group)
-    if not vs_team.empty:
-        vs_stats = weighted_recent_average(vs_team, stat_col, halflife_games=4)
-        n = len(vs_team)
-        history_weight = min(n / (n + 6), 0.35)
-        blended_mean = (1 - history_weight) * base_mean + history_weight * vs_stats["mean"]
-        adjustments.append(
-            f"vs {opponent} history ({n} start{'s' if n > 1 else ''}, last 2 seasons): "
-            f"avg {vs_stats['mean']:.1f} — weight {history_weight:.2f} → {blended_mean:.2f}"
-        )
+    if group == "pitching":
+        # Pitchers: blend in history vs this specific team
+        vs_team = get_starts_vs_team(player_name, opponent, MLB_RECENT_SEASONS[:2], group=group)
+        if not vs_team.empty:
+            vs_stats = weighted_recent_average(vs_team, stat_col)
+            n = len(vs_team)
+            history_weight = min(n / (n + 6), 0.35)
+            blended_mean = (1 - history_weight) * base_mean + history_weight * vs_stats["mean"]
+            adjustments.append(
+                f"vs {opponent} history ({n} start{'s' if n > 1 else ''}, last 2 seasons): "
+                f"avg {vs_stats['mean']:.1f} — weight {history_weight:.2f} → {blended_mean:.2f}"
+            )
+        else:
+            blended_mean = base_mean
+            adjustments.append(f"vs {opponent} history: no starts found in last 2 seasons")
     else:
-        blended_mean = base_mean
-        adjustments.append(f"vs {opponent} history: no starts found in last 2 seasons")
+        # Batters: look up today's game via the MLB schedule (authoritative),
+        # not from the Odds API event which can mis-assign players to games.
+        # Blend in career per-PA rate vs the opposing starter, capped at 50%
+        # weight because a starter only faces a batter ~50% of PAs.
+        AVG_PA_PER_GAME = 4.0
+        game_info = get_batter_game_info(player_name)
+        if game_info:
+            true_opponent      = game_info["opponent"]
+            opposing_pitcher   = game_info["opposing_starter"]
+            if true_opponent and true_opponent.lower() != opponent.lower():
+                adjustments.append(
+                    f"[schedule] corrected opponent: {opponent} → {true_opponent}"
+                )
+            opponent = true_opponent or opponent
+        else:
+            opposing_pitcher = get_opposing_starter(opponent)
+
+        if opposing_pitcher:
+            general_rate = base_mean / AVG_PA_PER_GAME
+
+            if stat_col == "hitsRunsRbi":
+                # Sum BvP rates across all three components independently
+                sub_hits = get_batter_vs_pitcher(player_name, opposing_pitcher, MLB_RECENT_SEASONS, "hits")
+                sub_runs = get_batter_vs_pitcher(player_name, opposing_pitcher, MLB_RECENT_SEASONS, "runs")
+                sub_rbi  = get_batter_vs_pitcher(player_name, opposing_pitcher, MLB_RECENT_SEASONS, "rbi")
+                sub_valid = [b for b in (sub_hits, sub_runs, sub_rbi)
+                             if b["rate_per_pa"] is not None and b["pa"] >= 5]
+                if sub_valid:
+                    combined_rate  = sum(b["rate_per_pa"] for b in sub_valid)
+                    min_pa         = min(b["pa"] for b in sub_valid)
+                    matchup_weight = min(min_pa / (min_pa + 20), 0.5)
+                    blended_rate   = (1 - matchup_weight) * general_rate + matchup_weight * combined_rate
+                    blended_mean   = blended_rate * AVG_PA_PER_GAME
+                    adjustments.append(
+                        f"vs {opposing_pitcher} H+R+RBI ({len(sub_valid)}/3 components, ≥{min_pa} PA): "
+                        f"{combined_rate:.3f}/PA vs {general_rate:.3f}/PA general — "
+                        f"weight {matchup_weight:.2f} → {blended_mean:.2f}"
+                    )
+                else:
+                    blended_mean = base_mean
+                    adjustments.append(f"vs {opposing_pitcher}: no career H+R+RBI data — using base")
+            else:
+                bvp = get_batter_vs_pitcher(
+                    player_name, opposing_pitcher, MLB_RECENT_SEASONS, stat_col
+                )
+                if bvp["rate_per_pa"] is not None and bvp["pa"] >= 5:
+                    matchup_rate   = bvp["rate_per_pa"]
+                    matchup_weight = min(bvp["pa"] / (bvp["pa"] + 20), 0.5)
+                    blended_rate   = (1 - matchup_weight) * general_rate + matchup_weight * matchup_rate
+                    blended_mean   = blended_rate * AVG_PA_PER_GAME
+                    adjustments.append(
+                        f"vs {opposing_pitcher} ({bvp['pa']} career PA): "
+                        f"{matchup_rate:.3f}/PA vs {general_rate:.3f}/PA general — "
+                        f"weight {matchup_weight:.2f} → {blended_mean:.2f}"
+                    )
+                else:
+                    blended_mean = base_mean
+                    note = f"({bvp['pa']} PA, need 5+)" if bvp["pa"] > 0 else "(no career PA)"
+                    adjustments.append(f"vs {opposing_pitcher} {note} — using base projection")
+        else:
+            blended_mean = base_mean
+            adjustments.append(f"opposing starter not yet announced for {opponent}")
 
     if group == "pitching" and stat_col == "strikeOuts" and not fast:
         pitcher_id = get_player_id(player_name)
@@ -206,7 +291,7 @@ def prizepicks_edge(player_name: str, opponent: str, pp_line: float,
     final_mean, base_mean, base_stats, adjustments, data_source = \
         _build_projection(player_name, opponent, stat_col, group)
 
-    use_poisson = group == "pitching" and stat_col == "strikeOuts"
+    use_poisson = stat_col in POISSON_STATS
     effective_std = max(base_stats["std"], MIN_STD.get(stat_col, 1.0))
 
     # Sportsbook market probability
@@ -270,7 +355,7 @@ def find_edge(player_name: str, opponent: str, event_id: str,
     final_mean, base_mean, base_stats, adjustments, data_source = \
         _build_projection(player_name, opponent, stat_col, group)
 
-    use_poisson = group == "pitching" and stat_col == "strikeOuts"
+    use_poisson = stat_col in POISSON_STATS
     effective_std = max(base_stats["std"], MIN_STD.get(stat_col, 1.0))
 
     # --- Odds ---
@@ -348,6 +433,70 @@ def _print_result(result: dict) -> None:
         print(f"  Market fair prob:  {result['market_fair_prob_over']*100:.1f}%  ({result['n_books']} books, vig {result['market_vig_pct']}%)")
         lean = "OVER" if result["edge_pct_pts"] > 0 else "UNDER"
         print(f"  Edge:              {result['edge_pct_pts']:+.1f} pp  → lean {lean}")
+
+
+def _fetch_pp_lines(stat_type: str = "Pitcher Strikeouts") -> dict:
+    """
+    Pulls today's PrizePicks lines from their projection API.
+    Returns {player_name_lower: line_score} for the given stat type.
+    Falls back to {} on any error so the batch can continue without PP data.
+    """
+    try:
+        resp = _requests.get(
+            "https://api.prizepicks.com/projections",
+            params={"league_id": 2, "per_page": 250, "single_stat": "true"},
+            headers={
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+                "Accept": "application/json, text/plain, */*",
+                "Referer": "https://app.prizepicks.com/",
+                "Origin": "https://app.prizepicks.com",
+            },
+            timeout=10,
+        )
+        if resp.status_code in (403, 429):
+            print("  [PP] API blocked (Cloudflare protection) — PP lines will be estimated from book line")
+            return {}
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        print(f"  [PP] API unavailable ({e}) — PP lines will be estimated from book line")
+        return {}
+
+    # Build player id -> name from included objects
+    player_map: dict = {}
+    for item in data.get("included", []):
+        if item.get("type") == "new_player":
+            player_map[item["id"]] = item["attributes"].get("name", "")
+
+    lines: dict = {}
+    for proj in data.get("data", []):
+        attrs = proj.get("attributes", {})
+        if attrs.get("stat_type", "").lower() != stat_type.lower():
+            continue
+        line = attrs.get("line_score")
+        if line is None:
+            continue
+        pid = proj.get("relationships", {}).get("new_player", {}).get("data", {}).get("id")
+        name = player_map.get(pid, "").strip()
+        if name:
+            lines[name.lower()] = float(line)
+
+    return lines
+
+
+def _match_pp_line(player_name: str, pp_lines: dict) -> float | None:
+    """
+    Matches an Odds API player name to a PrizePicks line.
+    Tries exact lowercase match first, then last-name match as fallback.
+    """
+    key = player_name.lower().strip()
+    if key in pp_lines:
+        return pp_lines[key]
+    last = key.split()[-1]
+    for pp_name, line in pp_lines.items():
+        if pp_name.split()[-1] == last:
+            return line
+    return None
 
 
 def _build_pitcher_opponent_map() -> dict:
@@ -476,9 +625,9 @@ def batch_scan(stat_col: str = "strikeOuts", group: str = "pitching",
 
     print("  Building today's probable starter map from MLB schedule...")
     schedule_map = _build_pitcher_opponent_map()
-    print(f"  {len(schedule_map)} probable starters found in schedule.\n")
+    print(f"  {len(schedule_map)} probable starters found in schedule.")
 
-    print(f"  {len(all_players)} pitchers listed. Running projections (fast mode)...\n")
+    print(f"  {len(all_players)} pitchers listed. Running projections...\n")
 
     results = []
 
@@ -491,7 +640,6 @@ def batch_scan(stat_col: str = "strikeOuts", group: str = "pitching",
             print(f"  [{player_name}] could not resolve opponent — skipping")
             continue
 
-        # Run projection
         try:
             final_mean, base_mean, base_stats, adjustments, _ = \
                 _build_projection(player_name, opponent, stat_col, group, fast=True)
@@ -503,14 +651,13 @@ def batch_scan(stat_col: str = "strikeOuts", group: str = "pitching",
         market_data = consensus_fair_probability(event_data["book_lines"])
         book_line = market_data["consensus_line"]
         market_fair_prob = market_data["fair_prob_over"]
-        use_poisson = group == "pitching" and stat_col == "strikeOuts"
+        use_poisson = stat_col in POISSON_STATS
         effective_std = max(base_stats["std"], MIN_STD.get(stat_col, 1.0))
 
         book_probs = compute_probs(final_mean, effective_std, book_line, use_poisson=use_poisson)
         model_p_over = book_probs["p_over"]
         market_edge = round((model_p_over - market_fair_prob) * 100, 1)
 
-        # PrizePicks edge — round book line to nearest whole number
         pp_line = round(book_line) if pp_assume_round else book_line
         pp_probs = compute_probs(final_mean, effective_std, pp_line, use_poisson=use_poisson)
         pp_edge = round((pp_probs["effective_over_rate"] - 0.5) * 100, 1)
@@ -540,7 +687,7 @@ def batch_scan(stat_col: str = "strikeOuts", group: str = "pitching",
     # Print ranked table
     print()
     print("  ── RANKED BY EDGE (highest first) ──\n")
-    print(f"  {'#':<3} {'Player':<25} {'vs':<22} {'Line':>5}  {'Proj':>5}  {'Mdl%':>6}  {'Mkt%':>6}  {'Edge':>7}  {'PP':>4}  {'Eff%':>6}  {'PP Edge':>8}  {'Lean'}")
+    print(f"  {'#':<3} {'Player':<25} {'vs':<22} {'Line':>5}  {'Proj':>5}  {'Mdl%':>6}  {'Mkt%':>6}  {'Edge':>7}  {'PP~':>4}  {'Eff%':>6}  {'PP Edge':>8}  {'Lean'}")
     print(f"  {'-'*3} {'-'*25} {'-'*22} {'-'*5}  {'-'*5}  {'-'*6}  {'-'*6}  {'-'*7}  {'-'*4}  {'-'*6}  {'-'*8}  {'-'*6}")
     for i, r in enumerate(results, 1):
         edge_str = f"{r['market_edge']:+.1f} pp"
@@ -548,12 +695,12 @@ def batch_scan(stat_col: str = "strikeOuts", group: str = "pitching",
         print(
             f"  {i:<3} {r['player']:<25} {r['opponent']:<22} {r['line']:>5.1f}  "
             f"{r['projection']:>5.2f}  {r['model_prob_over']*100:>5.1f}%  "
-            f"{r['market_fair_prob']*100:>5.1f}%  {edge_str:>8}  "
+            f"{r['market_fair_prob']*100:>5.1f}%  {edge_str:>7}  "
             f"{r['pp_line']:>4.0f}  {r['pp_effective_over_rate']*100:>5.1f}%  "
             f"{pp_edge_str:>8}  {r['lean']}"
         )
 
-    print(f"\n  Total: {len(results)} pitchers scanned across {len(events)} games")
+    print(f"\n  Total: {len(results)} pitchers scanned across {len(events)} games  (PP~ = estimated from book line)")
     return results
 
 

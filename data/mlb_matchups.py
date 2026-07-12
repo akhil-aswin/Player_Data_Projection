@@ -44,8 +44,10 @@ def get_team_k_factor(team_name: str, season: int) -> tuple:
         ks = int(stat.get("strikeOuts", 0))
         pas = int(stat.get("plateAppearances", 1))
         team_k_pct = ks / pas if pas else LEAGUE_AVG_K_PCT
-        factor = team_k_pct / LEAGUE_AVG_K_PCT
-        return factor, f"{team_name} K%: {team_k_pct*100:.1f}%  league: {LEAGUE_AVG_K_PCT*100:.1f}%  factor: ×{factor:.3f}"
+        raw_factor = team_k_pct / LEAGUE_AVG_K_PCT
+        factor = max(0.82, min(1.18, raw_factor))
+        cap_note = f"  [capped from ×{raw_factor:.3f}]" if raw_factor != factor else ""
+        return factor, f"{team_name} K%: {team_k_pct*100:.1f}%  league: {LEAGUE_AVG_K_PCT*100:.1f}%  factor: ×{factor:.3f}{cap_note}"
     except Exception as e:
         return 1.0, f"team K% unavailable ({e})"
 

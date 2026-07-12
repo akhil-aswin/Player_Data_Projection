@@ -1,0 +1,917 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MLB Props Model</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg:          #07090f;
+  --surface:     #0d1220;
+  --surface2:    #121929;
+  --border:      #1a2540;
+  --border2:     #243252;
+  --text:        #e2e8f0;
+  --text-dim:    #94a3b8;
+  --text-muted:  #4b6080;
+  --accent:      #3b82f6;
+  --green:       #22c55e;
+  --green-bg:    rgba(34,197,94,.12);
+  --red:         #f43f5e;
+  --red-bg:      rgba(244,63,94,.12);
+  --gold:        #f59e0b;
+  --sp-xs: 4px; --sp-sm: 8px; --sp-md: 16px;
+  --sp-lg: 24px; --sp-xl: 40px;
+  --r: 8px; --r-sm: 5px;
+  --font: 'Space Grotesk', sans-serif;
+  --mono: 'JetBrains Mono', monospace;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html { scroll-behavior: smooth; }
+body { background: var(--bg); color: var(--text); font-family: var(--font); font-size: 14px; min-height: 100vh; }
+
+/* ── Header ── */
+.header {
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  padding: 0 var(--sp-xl);
+  height: 56px;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-lg);
+  position: sticky; top: 0; z-index: 200;
+}
+.logo { font-size: 17px; font-weight: 700; letter-spacing: -.3px; }
+.logo em { font-style: normal; color: var(--accent); }
+.tabs { display: flex; gap: 2px; background: var(--bg); padding: 3px; border-radius: var(--r-sm); }
+.tab {
+  padding: 5px 14px; border: none; background: transparent;
+  color: var(--text-muted); cursor: pointer; font-family: var(--font);
+  font-size: 13px; font-weight: 500; border-radius: 4px;
+  transition: color .15s, background .15s;
+}
+.tab:hover { color: var(--text-dim); background: var(--surface2); }
+.tab.active { color: var(--text); background: var(--surface2); }
+.header-end { margin-left: auto; display: flex; align-items: center; gap: var(--sp-md); }
+.updated { font-family: var(--mono); font-size: 11px; color: var(--text-muted); }
+
+/* ── Buttons ── */
+.btn {
+  padding: 7px 16px; border: none; border-radius: var(--r-sm);
+  font-family: var(--font); font-size: 13px; font-weight: 600;
+  cursor: pointer; transition: all .15s; white-space: nowrap;
+}
+.btn-primary { background: var(--accent); color: #fff; }
+.btn-primary:hover { background: #2563eb; transform: translateY(-1px); }
+.btn-primary:active { transform: none; }
+.btn-primary:disabled { opacity: .45; cursor: not-allowed; transform: none; }
+.btn-ghost { background: transparent; color: var(--text-dim); border: 1px solid var(--border); }
+.btn-ghost:hover { background: var(--surface2); color: var(--text); border-color: var(--border2); }
+.btn-ghost:disabled { opacity: .45; cursor: not-allowed; }
+
+/* ── Layout ── */
+.main { max-width: 1440px; margin: 0 auto; padding: var(--sp-lg) var(--sp-xl); }
+.page { display: none; }
+.page.active { display: block; animation: fadeIn .2s ease; }
+@keyframes fadeIn { from { opacity:0; transform:translateY(4px); } to { opacity:1; transform:none; } }
+
+/* ── Controls ── */
+.controls { display: flex; align-items: flex-end; gap: var(--sp-md); flex-wrap: wrap; margin-bottom: var(--sp-lg); }
+.ctl { display: flex; flex-direction: column; gap: 5px; }
+.ctl-label { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .07em; color: var(--text-muted); }
+select, input[type=text], input[type=number] {
+  background: var(--surface); border: 1px solid var(--border);
+  color: var(--text); padding: 7px 12px; border-radius: var(--r-sm);
+  font-family: var(--font); font-size: 13px; outline: none;
+  transition: border-color .15s;
+}
+select {
+  appearance: none; -webkit-appearance: none; padding-right: 30px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%234b6080'/%3E%3C/svg%3E");
+  background-repeat: no-repeat; background-position: right 10px center;
+}
+select:focus, input:focus { border-color: var(--accent); }
+select:hover, input:hover { border-color: var(--border2); }
+
+/* ── Summary bar ── */
+.summary-bar {
+  display: flex; gap: var(--sp-xl);
+  padding-bottom: var(--sp-md); margin-bottom: var(--sp-lg);
+  border-bottom: 1px solid var(--border);
+}
+.sum-item { display: flex; flex-direction: column; gap: 2px; }
+.sum-label { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .07em; color: var(--text-muted); }
+.sum-val { font-family: var(--mono); font-size: 24px; font-weight: 500; }
+.sum-val.green { color: var(--green); }
+.sum-val.red { color: var(--red); }
+
+/* ── Table ── */
+.table-wrap { border-radius: var(--r); border: 1px solid var(--border); overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+thead { background: var(--surface); }
+th {
+  background: var(--surface); padding: 10px 12px;
+  font-size: 10px; font-weight: 600; text-transform: uppercase;
+  letter-spacing: .07em; color: var(--text-muted); text-align: left;
+  white-space: nowrap; cursor: pointer; user-select: none;
+  border-bottom: 1px solid var(--border); transition: color .15s;
+}
+th:hover { color: var(--text-dim); }
+th.sorted { color: var(--accent); }
+th .si { margin-left: 3px; font-size: 9px; opacity: .5; }
+th.sorted .si { opacity: 1; }
+
+tr.dr { cursor: pointer; }
+tr.dr td {
+  padding: 9px 12px; border-bottom: 1px solid var(--border);
+  transition: background .1s; white-space: nowrap;
+}
+tr.dr:hover td { background: var(--surface2); }
+tr.dr:last-of-type td { border-bottom: none; }
+
+tr.xr td { padding: 0; border-bottom: 1px solid var(--border); background: var(--bg); }
+.xr-inner { display: none; padding: var(--sp-md); }
+tr.dr.open + tr.xr .xr-inner { display: block; }
+
+.adj-list { list-style: none; display: flex; flex-direction: column; gap: 3px; }
+.adj-list li {
+  font-family: var(--mono); font-size: 11px; color: var(--text-dim);
+  padding: 3px 8px; border-left: 2px solid var(--border2); border-radius: 0 2px 2px 0;
+}
+.adj-list li.is-data { border-left-color: var(--border2); }
+.adj-list li.is-adj { border-left-color: var(--gold); color: var(--text); }
+
+/* ── Edge chips ── */
+.chip {
+  display: inline-block; padding: 2px 8px; border-radius: 3px;
+  font-family: var(--mono); font-size: 12px; font-weight: 500; white-space: nowrap;
+}
+.chip-pos  { color: var(--green); background: var(--green-bg); }
+.chip-neg  { color: var(--red);   background: var(--red-bg); }
+.chip-spos { color: #fff;         background: var(--green); }
+.chip-sneg { color: #fff;         background: var(--red); }
+
+.lean-over  { color: var(--green); font-weight: 600; }
+.lean-under { color: var(--red);   font-weight: 600; }
+
+.market-pill {
+  display: inline-block; font-size: 10px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: .05em;
+  padding: 2px 6px; border-radius: 3px;
+  background: var(--surface2); border: 1px solid var(--border2); color: var(--text-dim);
+}
+
+/* ── States ── */
+.loading { display: flex; align-items: center; justify-content: center; gap: var(--sp-md); padding: 80px; color: var(--text-muted); }
+.spinner { width: 18px; height: 18px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin .7s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.empty { text-align: center; padding: 80px; color: var(--text-muted); font-size: 13px; }
+.err { background: var(--red-bg); border: 1px solid rgba(244,63,94,.3); color: var(--red); padding: var(--sp-md); border-radius: var(--r-sm); font-size: 13px; }
+
+/* ── Single player ── */
+.sp-form {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--r); padding: var(--sp-lg);
+  display: flex; flex-direction: column; gap: var(--sp-md);
+  margin-bottom: var(--sp-lg);
+}
+.sp-row { display: flex; align-items: flex-end; gap: var(--sp-md); flex-wrap: wrap; }
+.sp-field { display: flex; flex-direction: column; gap: 5px; min-width: 160px; }
+.sp-field-full { flex: 1 1 100%; min-width: 0; }
+.sp-field label { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .07em; color: var(--text-muted); }
+.sp-field input, .sp-field select { width: 100%; }
+.sp-actions { display: flex; align-items: flex-end; padding-bottom: 0; }
+
+/* Combobox */
+.combo-wrap { position: relative; }
+.combo-list {
+  display: none; position: absolute; top: calc(100% + 4px); left: 0; right: 0;
+  background: var(--surface2); border: 1px solid var(--border2);
+  border-radius: var(--r-sm); max-height: 220px; overflow-y: auto; z-index: 400;
+  box-shadow: 0 8px 24px rgba(0,0,0,.4);
+}
+.combo-list.open { display: block; }
+.combo-item {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 9px 12px; cursor: pointer; font-size: 13px; gap: var(--sp-md);
+  transition: background .1s;
+}
+.combo-item:hover { background: var(--surface); }
+.combo-item-name { font-weight: 500; }
+.combo-item-sub { font-family: var(--mono); font-size: 11px; color: var(--text-muted); white-space: nowrap; }
+
+/* Auto-filled info strip */
+.sp-info-strip {
+  display: flex; gap: var(--sp-md); padding: var(--sp-sm) var(--sp-md);
+  background: var(--bg); border: 1px solid var(--border);
+  border-radius: var(--r-sm); flex-wrap: wrap;
+}
+.sp-info-chip { display: flex; flex-direction: column; gap: 2px; }
+.sp-info-chip-label { font-size: 9px; font-weight: 600; text-transform: uppercase; letter-spacing: .07em; color: var(--text-muted); }
+.sp-info-chip-val { font-size: 13px; font-weight: 500; color: var(--text); }
+
+/* ── Result card ── */
+.result-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r); padding: var(--sp-lg); }
+.rc-head { display: flex; align-items: baseline; gap: var(--sp-md); padding-bottom: var(--sp-md); border-bottom: 1px solid var(--border); margin-bottom: var(--sp-lg); flex-wrap: wrap; }
+.rc-player { font-size: 20px; font-weight: 700; }
+.rc-meta { font-size: 13px; color: var(--text-dim); }
+.rc-right { margin-left: auto; font-size: 12px; color: var(--text-muted); font-family: var(--mono); }
+
+/* Hero numbers row */
+.rc-hero { display: flex; gap: var(--sp-md); margin-bottom: var(--sp-lg); flex-wrap: wrap; }
+.rc-hero-block {
+  flex: 1; min-width: 120px;
+  background: var(--surface2); border: 1px solid var(--border);
+  border-radius: var(--r-sm); padding: var(--sp-md);
+  display: flex; flex-direction: column; gap: 4px;
+}
+.rc-hero-label { font-size: 9px; font-weight: 600; text-transform: uppercase; letter-spacing: .07em; color: var(--text-muted); }
+.rc-hero-val { font-family: var(--mono); font-size: 26px; font-weight: 600; line-height: 1; }
+.rc-hero-sub { font-size: 11px; color: var(--text-muted); font-family: var(--mono); }
+.rc-hero-val.green { color: var(--green); }
+.rc-hero-val.red   { color: var(--red); }
+
+.rc-sections { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-md); margin-bottom: var(--sp-lg); }
+.rc-section { background: var(--surface2); border: 1px solid var(--border); border-radius: var(--r-sm); padding: var(--sp-md); }
+.rc-section-title { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .07em; color: var(--text-muted); margin-bottom: var(--sp-md); }
+.rc-row { display: flex; justify-content: space-between; align-items: center; padding: 5px 0; font-size: 13px; }
+.rc-row + .rc-row { border-top: 1px solid var(--border); }
+.rc-row-label { color: var(--text-dim); }
+.rc-row-val { font-family: var(--mono); font-weight: 500; }
+.rc-adjs { margin-top: var(--sp-md); }
+.rc-adjs-title { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .07em; color: var(--text-muted); margin-bottom: var(--sp-sm); }
+
+/* Row entry animation */
+@keyframes rowIn { from { opacity:0; transform:translateY(3px); } to { opacity:1; transform:none; } }
+tr.dr { animation: rowIn .18s ease both; position: relative; z-index: 0; }
+tr.xr { position: relative; z-index: 0; }
+</style>
+</head>
+<body>
+
+<header class="header">
+  <div class="logo">MLB <em>Props</em></div>
+  <div class="tabs">
+    <button class="tab active" data-tab="board" onclick="switchTab(this)">Today's Board</button>
+    <button class="tab" data-tab="single" onclick="switchTab(this)">Single Player</button>
+  </div>
+  <div class="header-end">
+    <span class="updated" id="updatedAt"></span>
+    <button class="btn btn-ghost" id="refreshBtn" onclick="loadBoard(true)">↺ Refresh</button>
+  </div>
+</header>
+
+<main class="main">
+
+  <!-- ── BOARD ── -->
+  <div class="page active" id="page-board">
+
+    <div class="controls">
+      <div class="ctl">
+        <span class="ctl-label">Market</span>
+        <select id="mktFilter" onchange="onFilterChange()">
+          <option value="pitcher_strikeouts" selected>Pitcher K's</option>
+          <option value="pitcher_earned_runs">Earned Runs</option>
+          <option value="pitcher_walks">Walks (Pitcher)</option>
+          <option value="batter_hits">Hits</option>
+          <option value="batter_total_bases">Total Bases</option>
+          <option value="batter_home_runs">Home Runs</option>
+          <option value="batter_rbis">RBI</option>
+          <option value="batter_runs_scored">Runs</option>
+          <option value="batter_stolen_bases">Stolen Bases</option>
+          <option value="batter_hits_runs_rbis">H+R+RBI</option>
+          <option value="all">All Markets (slow)</option>
+        </select>
+      </div>
+      <div class="ctl">
+        <span class="ctl-label">Direction</span>
+        <select id="dirFilter" onchange="applyFilters()">
+          <option value="">All</option>
+          <option value="OVER">OVER</option>
+          <option value="UNDER">UNDER</option>
+        </select>
+      </div>
+      <div class="ctl">
+        <span class="ctl-label">Min Edge</span>
+        <select id="edgeFilter" onchange="applyFilters()">
+          <option value="0">Any</option>
+          <option value="5">5+ pp</option>
+          <option value="10" selected>10+ pp</option>
+          <option value="15">15+ pp</option>
+          <option value="20">20+ pp</option>
+        </select>
+      </div>
+      <div class="ctl">
+        <span class="ctl-label">Sort by</span>
+        <select id="sortSel" onchange="applyFilters()">
+          <option value="abs_market_edge">Market Edge</option>
+          <option value="abs_pp_edge">PP Edge</option>
+          <option value="player">Player</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="summary-bar" id="summaryBar" style="display:none">
+      <div class="sum-item"><span class="sum-label">Showing</span><span class="sum-val" id="sumTotal">—</span></div>
+      <div class="sum-item"><span class="sum-label">OVER edges</span><span class="sum-val green" id="sumOvers">—</span></div>
+      <div class="sum-item"><span class="sum-label">UNDER edges</span><span class="sum-val red" id="sumUnders">—</span></div>
+      <div class="sum-item"><span class="sum-label">Avg edge</span><span class="sum-val" id="sumAvg">—</span></div>
+    </div>
+
+    <div id="boardArea">
+      <div class="loading"><div class="spinner"></div>Loading today's props…</div>
+    </div>
+
+  </div>
+
+  <!-- ── SINGLE PLAYER ── -->
+  <div class="page" id="page-single">
+
+    <div class="sp-form">
+      <!-- Player search -->
+      <div class="sp-row">
+        <div class="sp-field sp-field-full">
+          <label>Search Player</label>
+          <div class="combo-wrap">
+            <input type="text" id="spSearch" class="combo-input"
+              placeholder="Loading players…" autocomplete="off"
+              oninput="onPlayerSearch(this.value)"
+              onfocus="onPlayerSearch(this.value)"
+              onblur="setTimeout(closeCombo, 150)">
+            <div class="combo-list" id="comboList"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Auto-filled info (hidden until player selected) -->
+      <div class="sp-info-strip" id="spInfoStrip" style="display:none">
+        <div class="sp-info-chip">
+          <span class="sp-info-chip-label">Role</span>
+          <span class="sp-info-chip-val" id="spRoleDisplay">—</span>
+        </div>
+        <div class="sp-info-chip">
+          <span class="sp-info-chip-label">Game</span>
+          <span class="sp-info-chip-val" id="spGameDisplay">—</span>
+        </div>
+        <div class="sp-info-chip">
+          <span class="sp-info-chip-label">Opponent</span>
+          <span class="sp-info-chip-val" id="spOpponentDisplay">—</span>
+        </div>
+      </div>
+
+      <!-- Hidden values passed to the API -->
+      <input type="hidden" id="spRole" value="hitting">
+      <input type="hidden" id="spEventId">
+      <input type="hidden" id="spOpponent">
+
+      <!-- Stat / source / run -->
+      <div class="sp-row">
+        <div class="sp-field">
+          <label>Stat</label>
+          <select id="spStat"></select>
+        </div>
+        <div class="sp-field">
+          <label>Source</label>
+          <select id="spSource" onchange="togglePpRow()">
+            <option value="sportsbook">Sportsbook</option>
+            <option value="prizepicks">PrizePicks</option>
+          </select>
+        </div>
+        <div class="sp-field" id="ppRow" style="display:none">
+          <label>PP Line</label>
+          <input type="number" id="spPpLine" step="0.5" placeholder="e.g. 5.0">
+        </div>
+        <div class="sp-actions">
+          <button class="btn btn-primary" id="spRunBtn" onclick="runSingle()">Run Projection</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="spResult"></div>
+
+  </div>
+
+</main>
+
+<script>
+// ── Constants ─────────────────────────────────────────────────────────────────
+const STAT_OPTS = {
+  pitching: [
+    ['strikeOuts','Strikeouts'],['earnedRuns','Earned Runs'],['baseOnBalls','Walks'],
+  ],
+  hitting: [
+    ['hits','Hits'],['totalBases','Total Bases'],['homeRuns','Home Runs'],
+    ['rbi','RBI'],['runs','Runs'],['stolenBases','Stolen Bases'],
+    ['hitsRunsRbi','H+R+RBI'],['strikeOuts','Strikeouts'],
+  ],
+};
+
+const ALL_MARKETS = [
+  'pitcher_strikeouts','pitcher_earned_runs','pitcher_walks',
+  'batter_hits','batter_total_bases','batter_home_runs',
+  'batter_rbis','batter_runs_scored','batter_stolen_bases',
+  'batter_hits_runs_rbis',
+];
+
+let _allRows = [];
+let _currentMarket = 'pitcher_strikeouts';
+
+// ── Tab switching ─────────────────────────────────────────────────────────────
+function switchTab(btn) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  btn.classList.add('active');
+  const tab = btn.dataset.tab;
+  document.getElementById('page-' + tab).classList.add('active');
+  if (tab === 'single') initSingle();
+}
+
+// ── Board ─────────────────────────────────────────────────────────────────────
+function onFilterChange() {
+  const mkt = document.getElementById('mktFilter').value;
+  if (mkt !== _currentMarket) {
+    _currentMarket = mkt;
+    loadBoard();
+  } else {
+    applyFilters();
+  }
+}
+
+async function loadBoard(forceRefresh = false) {
+  const mkt = document.getElementById('mktFilter').value;
+  const markets = mkt === 'all' ? ALL_MARKETS.join(',') : mkt;
+  _currentMarket = mkt;
+
+  document.getElementById('boardArea').innerHTML =
+    '<div class="loading"><div class="spinner"></div>Fetching odds and running projections…</div>';
+  document.getElementById('summaryBar').style.display = 'none';
+  document.getElementById('refreshBtn').disabled = true;
+
+  try {
+    let url = '/api/batch?markets=' + encodeURIComponent(markets);
+    if (forceRefresh) url += '&refresh=true';
+    const r = await fetch(url);
+    if (!r.ok) { const e = await r.json(); throw new Error(e.detail || r.statusText); }
+    const data = await r.json();
+    _allRows = data.results.map(r => ({ ...r, abs_pp_edge: Math.abs(r.pp_edge) }));
+    const cacheNote = data.cached ? ' (cached)' : '';
+    document.getElementById('updatedAt').textContent =
+      'Updated ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) + cacheNote;
+    applyFilters();
+  } catch (e) {
+    document.getElementById('boardArea').innerHTML = `<div class="err">⚠ ${e.message}</div>`;
+  } finally {
+    document.getElementById('refreshBtn').disabled = false;
+  }
+}
+
+function applyFilters() {
+  const dir   = document.getElementById('dirFilter').value;
+  const minE  = parseFloat(document.getElementById('edgeFilter').value) || 0;
+  const sortK = document.getElementById('sortSel').value;
+
+  let rows = _allRows.filter(r => {
+    if (dir && r.lean !== dir) return false;
+    if (r.abs_market_edge < minE) return false;
+    return true;
+  });
+
+  rows.sort((a, b) => {
+    const av = a[sortK], bv = b[sortK];
+    if (typeof av === 'string') return av.localeCompare(bv);
+    return bv - av;
+  });
+
+  renderBoard(rows);
+  updateSummary(rows);
+}
+
+function updateSummary(rows) {
+  const bar = document.getElementById('summaryBar');
+  if (!rows.length) { bar.style.display = 'none'; return; }
+  bar.style.display = 'flex';
+  document.getElementById('sumTotal').textContent   = rows.length;
+  document.getElementById('sumOvers').textContent   = rows.filter(r => r.lean === 'OVER').length;
+  document.getElementById('sumUnders').textContent  = rows.filter(r => r.lean === 'UNDER').length;
+  const avg = rows.reduce((s, r) => s + r.abs_market_edge, 0) / rows.length;
+  document.getElementById('sumAvg').textContent     = avg.toFixed(1) + ' pp';
+}
+
+function chipClass(v, strong = 15) {
+  if (v >=  strong) return 'chip-spos';
+  if (v >   0)      return 'chip-pos';
+  if (v <= -strong) return 'chip-sneg';
+  return 'chip-neg';
+}
+
+function renderBoard(rows) {
+  if (!rows.length) {
+    const mkt   = document.getElementById('mktFilter').selectedOptions[0]?.text || '';
+    const minE  = document.getElementById('edgeFilter').value;
+    const total = _allRows.length;
+    const msg   = total === 0
+      ? `No <strong>${mkt}</strong> props found in the Odds API for today.`
+      : `All ${total} result${total > 1 ? 's' : ''} filtered out — try lowering Min Edge (currently ${minE} pp) or changing Direction.`;
+    document.getElementById('boardArea').innerHTML = `<div class="empty">${msg}</div>`;
+    return;
+  }
+
+  const colDefs = [
+    { key: 'player',               label: 'Player' },
+    { key: 'market',               label: 'Stat' },
+    { key: 'opponent',             label: 'vs' },
+    { key: 'line',                 label: 'Line' },
+    { key: 'projection',           label: 'Proj' },
+    { key: 'model_prob_over',      label: 'Mdl%' },
+    { key: 'market_fair_prob',     label: 'Mkt%' },
+    { key: 'market_edge',          label: 'Edge' },
+    { key: 'pp_line',              label: 'PP~' },
+    { key: 'pp_effective_over_rate', label: 'Eff%' },
+    { key: 'pp_edge',              label: 'PP Edge' },
+    { key: 'lean',                 label: 'Lean' },
+  ];
+
+  const sortK = document.getElementById('sortSel').value;
+
+  const thead = '<tr>' + colDefs.map(c => {
+    const active = (sortK === c.key || (sortK === 'abs_market_edge' && c.key === 'market_edge') || (sortK === 'abs_pp_edge' && c.key === 'pp_edge'));
+    return `<th class="${active ? 'sorted' : ''}">${c.label}<span class="si">${active ? '↓' : '↕'}</span></th>`;
+  }).join('') + '</tr>';
+
+  const tbody = rows.map((r, i) => {
+    const delay = Math.min(i * 0.015, 0.3).toFixed(3);
+    const leanCls = r.lean === 'OVER' ? 'lean-over' : 'lean-under';
+    const adjHtml = r.adjustments.map(a => {
+      const isData = a.startsWith('[data]');
+      const text = a.replace('[data] ', '').replace('[pitch-count adj] ', '');
+      return `<li class="${isData ? 'is-data' : 'is-adj'}">${text}</li>`;
+    }).join('');
+
+    return `
+      <tr class="dr" style="animation-delay:${delay}s" onclick="toggleDetail(this)">
+        <td><strong>${r.player}</strong></td>
+        <td><span class="market-pill">${r.market}</span></td>
+        <td style="color:var(--text-dim)">${r.opponent}</td>
+        <td style="font-family:var(--mono)">${r.line.toFixed(1)}</td>
+        <td style="font-family:var(--mono);font-weight:600">${r.projection.toFixed(2)}</td>
+        <td style="font-family:var(--mono)">${(r.model_prob_over * 100).toFixed(1)}%</td>
+        <td style="font-family:var(--mono)">${(r.market_fair_prob * 100).toFixed(1)}%</td>
+        <td><span class="chip ${chipClass(r.market_edge)}">${r.market_edge > 0 ? '+' : ''}${r.market_edge.toFixed(1)} pp</span></td>
+        <td style="font-family:var(--mono);color:var(--text-dim)">${r.pp_line.toFixed(0)}</td>
+        <td style="font-family:var(--mono)">${(r.pp_effective_over_rate * 100).toFixed(1)}%</td>
+        <td><span class="chip ${chipClass(r.pp_edge)}">${r.pp_edge > 0 ? '+' : ''}${r.pp_edge.toFixed(1)} pp</span></td>
+        <td class="${leanCls}">${r.lean}</td>
+      </tr>
+      <tr class="xr"><td colspan="${colDefs.length}">
+        <div class="xr-inner">
+          <span style="font-size:11px;color:var(--text-muted);font-family:var(--mono)">
+            ${r.games_used} games · ${r.n_books} books
+          </span>
+          <ul class="adj-list" style="margin-top:8px">${adjHtml}</ul>
+        </div>
+      </td></tr>`;
+  }).join('');
+
+  document.getElementById('boardArea').innerHTML = `
+    <div class="table-wrap">
+      <table><thead>${thead}</thead><tbody>${tbody}</tbody></table>
+    </div>`;
+}
+
+function toggleDetail(tr) {
+  tr.classList.toggle('open');
+}
+
+// ── Single Player ─────────────────────────────────────────────────────────────
+let _allPlayers      = [];
+let _filteredPlayers = [];
+let _playersLoaded   = false;
+let _playersLoading  = false;
+
+async function initSingle() {
+  updateSpStats('hitting');
+
+  // Seed from board rows immediately so the user can search right away
+  if (_allRows.length && !_allPlayers.length) {
+    const seen = new Set();
+    _allPlayers = _allRows
+      .filter(r => { const k = r.player; if (seen.has(k)) return false; seen.add(k); return true; })
+      .map(r => ({
+        name:      r.player,
+        group:     r.group,
+        event_id:  '',       // filled in after /api/players loads
+        home_team: '',
+        away_team: '',
+        opponent:  r.opponent,
+      }));
+  }
+
+  if (_playersLoaded || _playersLoading) return;
+  _playersLoading = true;
+
+  const input = document.getElementById('spSearch');
+  input.placeholder = `Searching today's games…`;
+
+  try {
+    const r = await fetch('/api/players');
+    if (!r.ok) throw new Error(r.statusText);
+    const data = await r.json();
+    _allPlayers  = data.players;
+    _playersLoaded = true;
+    input.placeholder = `Search ${_allPlayers.length} players…`;
+    // Refresh dropdown if user is already typing
+    if (input.value.trim()) onPlayerSearch(input.value);
+  } catch (e) {
+    input.placeholder = 'Search players…';
+  } finally {
+    _playersLoading = false;
+  }
+}
+
+function onPlayerSearch(val) {
+  const list = document.getElementById('comboList');
+  const q = val.trim().toLowerCase();
+
+  if (!q) { list.classList.remove('open'); return; }
+
+  if (!_allPlayers.length) {
+    list.innerHTML = `<div class="combo-item"><span class="combo-item-name" style="color:var(--text-muted)">Loading players…</span></div>`;
+    list.classList.add('open');
+    return;
+  }
+
+  _filteredPlayers = _allPlayers
+    .filter(p => p.name.toLowerCase().includes(q))
+    .slice(0, 12);
+
+  if (!_filteredPlayers.length) {
+    list.innerHTML = `
+      <div class="combo-item" onmousedown="resolvePlayer(${JSON.stringify(val)})">
+        <span class="combo-item-name">🔍 Look up "<strong>${val}</strong>" in today's schedule</span>
+        <span class="combo-item-sub">searches MLB API directly</span>
+      </div>`;
+    list.classList.add('open');
+    return;
+  }
+
+  list.innerHTML = _filteredPlayers.map((p, i) => {
+    const role = p.group === 'pitching' ? 'P' : 'B';
+    const game = (p.away_team && p.home_team) ? `${p.away_team} @ ${p.home_team}` : '';
+    const opp  = p.opponent || '';
+    const sub  = [role, game, opp ? 'vs ' + opp : ''].filter(Boolean).join(' · ');
+    return `<div class="combo-item" onmousedown="selectPlayer(${i})">
+      <span class="combo-item-name">${p.name}</span>
+      <span class="combo-item-sub">${sub}</span>
+    </div>`;
+  }).join('');
+  list.classList.add('open');
+}
+
+function selectPlayer(idx) {
+  const p = _filteredPlayers[idx];
+  document.getElementById('spSearch').value = p.name;
+  closeCombo();
+
+  // Fill hidden values
+  document.getElementById('spRole').value     = p.group;
+  document.getElementById('spEventId').value  = p.event_id || '';
+  document.getElementById('spOpponent').value = p.opponent || '';
+
+  // Show info strip
+  document.getElementById('spRoleDisplay').textContent     = p.group === 'pitching' ? 'Pitcher' : 'Batter';
+  const game = (p.away_team && p.home_team) ? `${p.away_team} @ ${p.home_team}` : '(loading…)';
+  document.getElementById('spGameDisplay').textContent     = game;
+  document.getElementById('spOpponentDisplay').textContent = p.opponent || '(loading…)';
+  document.getElementById('spInfoStrip').style.display     = 'flex';
+
+  // If event_id was missing, try to patch from the full player list
+  if (!p.event_id) {
+    const patchName = p.name;
+    function _patch() {
+      const full = _allPlayers.find(x => x.name === patchName && x.event_id);
+      if (full && document.getElementById('spSearch').value === patchName) {
+        document.getElementById('spEventId').value            = full.event_id || '';
+        document.getElementById('spOpponent').value           = full.opponent || '';
+        const g = (full.away_team && full.home_team) ? `${full.away_team} @ ${full.home_team}` : game;
+        document.getElementById('spGameDisplay').textContent      = g;
+        document.getElementById('spOpponentDisplay').textContent  = full.opponent || 'Unknown';
+      }
+    }
+    if (_playersLoaded) {
+      _patch();  // already loaded — patch immediately
+    } else {
+      const iv = setInterval(() => { if (!_playersLoaded) return; clearInterval(iv); _patch(); }, 300);
+    }
+  }
+
+  // Update stat dropdown for this role
+  updateSpStats(p.group);
+}
+
+function closeCombo() {
+  document.getElementById('comboList').classList.remove('open');
+}
+
+async function resolvePlayer(name) {
+  const list  = document.getElementById('comboList');
+  const input = document.getElementById('spSearch');
+  list.innerHTML = `<div class="combo-item"><span class="combo-item-name" style="color:var(--text-muted)">Searching schedule…</span></div>`;
+
+  try {
+    const r = await fetch('/api/resolve-player?name=' + encodeURIComponent(name));
+    if (!r.ok) {
+      const e = await r.json();
+      list.innerHTML = `<div class="combo-item"><span class="combo-item-name" style="color:var(--red)">${e.detail}</span></div>`;
+      return;
+    }
+    const p = await r.json();
+
+    // Add to _allPlayers so it's available on future searches
+    if (!_allPlayers.find(x => x.name === p.name)) {
+      _allPlayers.push(p);
+    }
+
+    // Select as if it came from the dropdown
+    _filteredPlayers = [p];
+    selectPlayer(0);
+  } catch (e) {
+    list.innerHTML = `<div class="combo-item"><span class="combo-item-name" style="color:var(--red)">Lookup failed</span></div>`;
+  }
+}
+
+function updateSpStats(group) {
+  const role = group || document.getElementById('spRole').value || 'hitting';
+  const sel  = document.getElementById('spStat');
+  sel.innerHTML = STAT_OPTS[role].map(([v, l]) =>
+    `<option value="${v}">${l}</option>`
+  ).join('');
+}
+
+function togglePpRow() {
+  document.getElementById('ppRow').style.display =
+    document.getElementById('spSource').value === 'prizepicks' ? 'flex' : 'none';
+}
+
+async function runSingle() {
+  const player   = document.getElementById('spSearch').value.trim();
+  const group    = document.getElementById('spRole').value;
+  const stat_col = document.getElementById('spStat').value;
+  const opponent = document.getElementById('spOpponent').value.trim();
+  const event_id = document.getElementById('spEventId').value;
+  const source   = document.getElementById('spSource').value;
+  const pp_line  = parseFloat(document.getElementById('spPpLine').value) || null;
+
+  if (!player || !event_id) {
+    document.getElementById('spResult').innerHTML =
+      '<div class="err">Select a player from the dropdown first.</div>';
+    return;
+  }
+
+  const btn = document.getElementById('spRunBtn');
+  btn.disabled = true; btn.textContent = 'Running…';
+  document.getElementById('spResult').innerHTML =
+    '<div class="loading"><div class="spinner"></div>Fetching stats and odds…</div>';
+
+  try {
+    const res = await fetch('/api/project', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ player, opponent, event_id, stat_col, group, source, pp_line }),
+    });
+    if (!res.ok) { const e = await res.json(); throw new Error(e.detail); }
+    renderSingleResult(await res.json());
+  } catch (e) {
+    document.getElementById('spResult').innerHTML = `<div class="err">⚠ ${e.message}</div>`;
+  } finally {
+    btn.disabled = false; btn.textContent = 'Run Projection';
+  }
+}
+
+function renderSingleResult(r) {
+  const isPP = 'pp_line' in r;
+  const adjs = r.adjustments.map(a => {
+    const isData = a.startsWith('[data]');
+    return `<li class="${isData ? 'is-data' : 'is-adj'}">${a.replace('[data] ','').replace('[pitch-count adj] ','')}</li>`;
+  }).join('');
+
+  // ── Hero numbers ──────────────────────────────────────────────────────────
+  let heroHtml = '';
+  if (isPP) {
+    const bookEdge   = r.market_edge_pp;
+    const ppEdge     = r.pp_edge_pp;
+    const bookCls    = bookEdge >= 0 ? 'green' : 'red';
+    const ppCls      = ppEdge  >= 0 ? 'green' : 'red';
+    heroHtml = `
+      <div class="rc-hero">
+        <div class="rc-hero-block">
+          <span class="rc-hero-label">Projection</span>
+          <span class="rc-hero-val">${r.adjusted_projection}</span>
+          <span class="rc-hero-sub">base ${r.base_projection} · ${r.distribution}</span>
+        </div>
+        <div class="rc-hero-block">
+          <span class="rc-hero-label">Book line</span>
+          <span class="rc-hero-val">${r.book_line}</span>
+          <span class="rc-hero-sub">Model: ${(r.model_prob_at_book_line*100).toFixed(1)}% over · Mkt: ${(r.market_fair_prob_over*100).toFixed(1)}%</span>
+        </div>
+        <div class="rc-hero-block">
+          <span class="rc-hero-label">PP line</span>
+          <span class="rc-hero-val">${r.pp_line}${r.pp_has_push ? ' ↕' : ''}</span>
+          <span class="rc-hero-sub">Eff over: ${(r.pp_effective_over_rate*100).toFixed(1)}%${r.pp_has_push ? ' · push '+( r.pp_p_push*100).toFixed(1)+'%' : ''}</span>
+        </div>
+        <div class="rc-hero-block">
+          <span class="rc-hero-label">Market edge</span>
+          <span class="rc-hero-val ${bookCls}">${bookEdge > 0 ? '+' : ''}${bookEdge.toFixed(1)}<span style="font-size:14px"> pp</span></span>
+          <span class="rc-hero-sub">${bookEdge >= 0 ? 'OVER' : 'UNDER'} lean</span>
+        </div>
+        <div class="rc-hero-block">
+          <span class="rc-hero-label">PP edge</span>
+          <span class="rc-hero-val ${ppCls}">${ppEdge > 0 ? '+' : ''}${ppEdge.toFixed(1)}<span style="font-size:14px"> pp</span></span>
+          <span class="rc-hero-sub">${ppEdge >= 0 ? 'OVER' : 'UNDER'} lean</span>
+        </div>
+      </div>`;
+  } else {
+    const edge   = r.edge_pct_pts;
+    const edgeCls = edge >= 0 ? 'green' : 'red';
+    heroHtml = `
+      <div class="rc-hero">
+        <div class="rc-hero-block">
+          <span class="rc-hero-label">Projection</span>
+          <span class="rc-hero-val">${r.adjusted_projection}</span>
+          <span class="rc-hero-sub">base ${r.base_projection} · ${r.distribution}</span>
+        </div>
+        <div class="rc-hero-block">
+          <span class="rc-hero-label">Book line · ${r.n_books} books</span>
+          <span class="rc-hero-val">${r.line}</span>
+          <span class="rc-hero-sub">${r.market_vig_pct}% vig</span>
+        </div>
+        <div class="rc-hero-block">
+          <span class="rc-hero-label">Model over %</span>
+          <span class="rc-hero-val">${(r.model_prob_over*100).toFixed(1)}<span style="font-size:14px">%</span></span>
+          <span class="rc-hero-sub">Market: ${(r.market_fair_prob_over*100).toFixed(1)}%</span>
+        </div>
+        <div class="rc-hero-block">
+          <span class="rc-hero-label">Edge</span>
+          <span class="rc-hero-val ${edgeCls}">${edge > 0 ? '+' : ''}${edge.toFixed(1)}<span style="font-size:14px"> pp</span></span>
+          <span class="rc-hero-sub">${edge >= 0 ? 'OVER' : 'UNDER'} lean</span>
+        </div>
+      </div>`;
+  }
+
+  // ── Detail rows ───────────────────────────────────────────────────────────
+  let detailHtml = '';
+  if (isPP) {
+    detailHtml = `
+      <div class="rc-sections">
+        <div class="rc-section">
+          <div class="rc-section-title">Sportsbook</div>
+          <div class="rc-row"><span class="rc-row-label">Model P(over ${r.book_line})</span><span class="rc-row-val">${(r.model_prob_at_book_line*100).toFixed(1)}%</span></div>
+          <div class="rc-row"><span class="rc-row-label">Market fair P(over)</span><span class="rc-row-val">${(r.market_fair_prob_over*100).toFixed(1)}%</span></div>
+          <div class="rc-row"><span class="rc-row-label">Edge</span><span class="rc-row-val"><span class="chip ${chipClass(r.market_edge_pp)}">${r.market_edge_pp>0?'+':''}${r.market_edge_pp.toFixed(1)} pp</span></span></div>
+        </div>
+        <div class="rc-section">
+          <div class="rc-section-title">PrizePicks${r.pp_has_push ? ' — push possible' : ''}</div>
+          <div class="rc-row"><span class="rc-row-label">P(over ${r.pp_line})</span><span class="rc-row-val">${(r.pp_p_over*100).toFixed(1)}%</span></div>
+          ${r.pp_has_push ? `<div class="rc-row"><span class="rc-row-label">P(push = ${r.pp_line})</span><span class="rc-row-val">${(r.pp_p_push*100).toFixed(1)}% ← stake back</span></div>` : ''}
+          <div class="rc-row"><span class="rc-row-label">P(under ${r.pp_line})</span><span class="rc-row-val">${(r.pp_p_under*100).toFixed(1)}%</span></div>
+          <div class="rc-row"><span class="rc-row-label">Effective over rate</span><span class="rc-row-val">${(r.pp_effective_over_rate*100).toFixed(1)}%</span></div>
+          <div class="rc-row"><span class="rc-row-label">Edge vs 50%</span><span class="rc-row-val"><span class="chip ${chipClass(r.pp_edge_pp)}">${r.pp_edge_pp>0?'+':''}${r.pp_edge_pp.toFixed(1)} pp</span></span></div>
+        </div>
+      </div>`;
+  } else {
+    detailHtml = `
+      <div class="rc-section" style="margin-bottom:var(--sp-md)">
+        <div class="rc-section-title">Sportsbook — ${r.n_books} books · ${r.market_vig_pct}% vig</div>
+        <div class="rc-row"><span class="rc-row-label">Model P(over ${r.line})</span><span class="rc-row-val">${(r.model_prob_over*100).toFixed(1)}%</span></div>
+        <div class="rc-row"><span class="rc-row-label">Market fair P(over)</span><span class="rc-row-val">${(r.market_fair_prob_over*100).toFixed(1)}%</span></div>
+        <div class="rc-row"><span class="rc-row-label">Model P(under ${r.line})</span><span class="rc-row-val">${((1-r.model_prob_over)*100).toFixed(1)}%</span></div>
+        <div class="rc-row"><span class="rc-row-label">Edge</span><span class="rc-row-val"><span class="chip ${chipClass(r.edge_pct_pts)}">${r.edge_pct_pts>0?'+':''}${r.edge_pct_pts.toFixed(1)} pp</span></span></div>
+      </div>`;
+  }
+
+  document.getElementById('spResult').innerHTML = `
+    <div class="result-card">
+      <div class="rc-head">
+        <span class="rc-player">${r.player}</span>
+        <span class="rc-meta">vs ${r.opponent} · ${r.stat}</span>
+        <span class="rc-right">${r.games_used} games · ${r.data_source}</span>
+      </div>
+      ${heroHtml}
+      ${detailHtml}
+      <div class="rc-adjs">
+        <div class="rc-adjs-title">Adjustments</div>
+        <ul class="adj-list">${adjs}</ul>
+      </div>
+    </div>`;
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+// Always start on pitcher strikeouts — don't let the browser autofill a stale selection
+document.getElementById('mktFilter').value = 'pitcher_strikeouts';
+document.getElementById('dirFilter').value = '';
+document.getElementById('edgeFilter').value = '10';
+loadBoard();
+</script>
+</body>
+</html>
