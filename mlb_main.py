@@ -6,6 +6,8 @@ de-vigs them, and outputs an edge estimate.
 """
 
 import math
+import time as _time
+import unicodedata
 import statsapi
 import requests as _requests
 from scipy.stats import poisson, norm
@@ -24,6 +26,30 @@ from data.mlb_matchups import (
 )
 from data.odds_client import OddsAPIClient
 from analysis.devig import consensus_fair_probability
+
+# ── Historical calibration ────────────────────────────────────────────────────
+# Loaded from picks.db; refreshed every hour so a running server picks up new
+# resolved picks without a restart. Gracefully returns {} if DB unavailable.
+
+_cal_cache:    dict  = {}
+_cal_cache_ts: float = 0.0
+_CAL_TTL = 3600        # refresh every hour
+_CAL_MIN_SAMPLES = 30  # don't apply until we have this many resolved picks
+_CAL_MAX_CORRECTION = 0.30  # cap correction at 30% of raw projection
+
+
+def _load_calibration() -> dict:
+    global _cal_cache, _cal_cache_ts
+    if _time.time() - _cal_cache_ts < _CAL_TTL:
+        return _cal_cache
+    try:
+        from database import get_calibration_data
+        _cal_cache    = get_calibration_data(min_samples=_CAL_MIN_SAMPLES)
+        _cal_cache_ts = _time.time()
+    except Exception:
+        pass
+    return _cal_cache
+
 
 BATTER_STAT_MAP = {
     "hits": "hits",
@@ -170,7 +196,7 @@ def _build_projection(player_name: str, opponent: str,
         if not vs_team.empty:
             vs_stats = weighted_recent_average(vs_team, stat_col)
             n = len(vs_team)
-            history_weight = min(n / (n + 6), 0.35)
+            history_weight = min(n / (n + 10), 0.25)
             blended_mean = (1 - history_weight) * base_mean + history_weight * vs_stats["mean"]
             adjustments.append(
                 f"vs {opponent} history ({n} start{'s' if n > 1 else ''}, last 2 seasons): "
@@ -279,6 +305,30 @@ def _build_projection(player_name: str, opponent: str,
         blended_mean *= team_factor
         adjustments.append(f"team K% (fast mode): {team_detail}")
 
+    # ── Historical calibration correction ────────────────────────────────────
+    # Apply a bias correction learned from resolved picks in picks.db.
+    # bias = avg(projection - actual): positive means we over-project.
+    # Only activates once >= 30 resolved picks exist for this stat.
+    # Correction is capped at 30% of the raw projection to prevent
+    # calibration from dominating on thin or noisy samples.
+    cal = _load_calibration()
+    if stat_col in cal:
+        c    = cal[stat_col]
+        bias = c["bias"]                          # positive = over-project
+        if abs(bias) >= 0.05:                     # ignore micro-biases < 0.05
+            max_correction = blended_mean * _CAL_MAX_CORRECTION
+            correction     = max(-max_correction, min(max_correction, bias))
+            calibrated     = max(0.0, blended_mean - correction)
+            adjustments.append(
+                f"[calibration] {c['n']} resolved picks: "
+                f"avg proj {c['avg_proj']:.2f} vs avg actual {c['avg_actual']:.2f} "
+                f"→ bias {bias:+.3f}, correction {-correction:+.3f} "
+                f"→ {blended_mean:.2f} → {calibrated:.2f}  "
+                f"(hit rate {c['actual_hit_rate']*100:.0f}% vs "
+                f"expected {c['expected_hit_rate']*100:.0f}%)"
+            )
+            blended_mean = calibrated
+
     return blended_mean, base_mean, base_stats, adjustments, data_source
 
 
@@ -375,7 +425,9 @@ def find_edge(player_name: str, opponent: str, event_id: str,
     market_data = consensus_fair_probability(book_lines)
     line = market_data["consensus_line"]
 
-    model_p_over = model_prob_over(final_mean, effective_std, line, use_poisson=use_poisson)
+    book_probs    = compute_probs(final_mean, effective_std, line, use_poisson=use_poisson)
+    model_p_over  = book_probs["p_over"]
+    compare_p     = book_probs["effective_over_rate"] if use_poisson else model_p_over
     market_p_over = market_data["fair_prob_over"]
 
     return {
@@ -387,7 +439,7 @@ def find_edge(player_name: str, opponent: str, event_id: str,
         "adjusted_projection": round(final_mean, 2),
         "model_prob_over": round(model_p_over, 3),
         "market_fair_prob_over": round(market_p_over, 3),
-        "edge_pct_pts": round((model_p_over - market_p_over) * 100, 1),
+        "edge_pct_pts": round((compare_p - market_p_over) * 100, 1),
         "market_vig_pct": round(market_data["avg_vig_pct"], 1),
         "n_books": market_data["n_books"],
         "games_used": base_stats["n_games"],
@@ -499,10 +551,18 @@ def _match_pp_line(player_name: str, pp_lines: dict) -> float | None:
     return None
 
 
+def _normalize_name(name: str) -> str:
+    """Lowercase + strip accents so 'Sánchez' == 'Sanchez' in comparisons."""
+    return ''.join(
+        c for c in unicodedata.normalize('NFD', name.lower().strip())
+        if unicodedata.category(c) != 'Mn'
+    )
+
+
 def _build_pitcher_opponent_map() -> dict:
     """
     Pulls today's MLB schedule from statsapi and returns a dict mapping
-    lowercase pitcher name → opponent team name (as statsapi reports it).
+    accent-normalized lowercase pitcher name → opponent team name.
 
     Home pitchers face the away team; away pitchers face the home team.
     Only probable starters are included — blank entries are skipped.
@@ -521,9 +581,9 @@ def _build_pitcher_opponent_map() -> dict:
         home_pitcher = game.get("home_probable_pitcher", "").strip()
         away_pitcher = game.get("away_probable_pitcher", "").strip()
         if home_pitcher:
-            mapping[home_pitcher.lower()] = away
+            mapping[_normalize_name(home_pitcher)] = away
         if away_pitcher:
-            mapping[away_pitcher.lower()] = home
+            mapping[_normalize_name(away_pitcher)] = home
     return mapping
 
 
@@ -533,28 +593,29 @@ def _resolve_opponent(player_name: str, schedule_map: dict,
     Returns the opponent team name for a pitcher, or None if it can't be resolved.
     Tries the statsapi schedule first (exact, then last-name match), then falls
     back to a currentTeam lookup against the event's home/away teams.
+    All comparisons are accent-normalized so 'Sanchez' matches 'Sánchez'.
     """
-    name_lower = player_name.lower().strip()
+    name_norm = _normalize_name(player_name)
 
-    # Exact match against schedule
-    if name_lower in schedule_map:
-        return schedule_map[name_lower]
+    # Exact match against schedule (accent-normalized)
+    if name_norm in schedule_map:
+        return schedule_map[name_norm]
 
-    # Last-name match against schedule (handles middle initials, accents, etc.)
-    last_name = name_lower.split()[-1]
+    # Last-name match (handles middle initials, spelling variants)
+    last_name = name_norm.split()[-1]
     for sched_name, opponent in schedule_map.items():
         if sched_name.split()[-1] == last_name:
             return opponent
 
-    # Fall back to statsapi currentTeam (guarded against empty-string bug)
+    # Fall back to statsapi currentTeam
     try:
         matches = statsapi.lookup_player(player_name)
         if matches:
             current_team = matches[0].get("currentTeam", {}).get("name", "").strip()
             if current_team:
-                home_l = home_team.lower()
-                away_l = away_team.lower()
-                ct_l = current_team.lower()
+                home_l = _normalize_name(home_team)
+                away_l = _normalize_name(away_team)
+                ct_l   = _normalize_name(current_team)
                 if ct_l in home_l or home_l in ct_l:
                     return away_team
                 if ct_l in away_l or away_l in ct_l:
@@ -656,7 +717,12 @@ def batch_scan(stat_col: str = "strikeOuts", group: str = "pitching",
 
         book_probs = compute_probs(final_mean, effective_std, book_line, use_poisson=use_poisson)
         model_p_over = book_probs["p_over"]
-        market_edge = round((model_p_over - market_fair_prob) * 100, 1)
+        # For whole-number Poisson lines, push probability is non-trivial and the
+        # market doesn't price it — use effective_over_rate (push-excluded) so we
+        # compare decisive-outcome probabilities on equal footing.
+        # For half-integer lines, effective_over_rate == p_over (no push possible).
+        compare_p = book_probs["effective_over_rate"] if use_poisson else model_p_over
+        market_edge = round((compare_p - market_fair_prob) * 100, 1)
 
         pp_line = round(book_line) if pp_assume_round else book_line
         pp_probs = compute_probs(final_mean, effective_std, pp_line, use_poisson=use_poisson)

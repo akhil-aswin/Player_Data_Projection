@@ -3,9 +3,20 @@ FastAPI backend for the MLB props model.
 Run with: uvicorn api:app --reload
 """
 
+import asyncio
 import contextlib, datetime, io, os, sys, time
+from contextlib import asynccontextmanager
+import pandas as _pd
 import statsapi as _statsapi
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import database as _db
+
+try:
+    from zoneinfo import ZoneInfo as _ZoneInfo
+    _CDT = _ZoneInfo("America/Chicago")
+except ImportError:
+    _CDT = datetime.timezone(datetime.timedelta(hours=-5))
 
 # ── Server-side cache ─────────────────────────────────────────────────────────
 # Odds API calls are expensive (token-limited). Cache results for CACHE_TTL
@@ -52,9 +63,99 @@ from mlb_main import (
     find_edge,
     MIN_STD,
     POISSON_STATS,
+    _fetch_pp_lines,
+    _match_pp_line,
 )
 
-app = FastAPI(title="MLB Props Model")
+# PrizePicks display name for each Odds API market key
+PP_STAT_TYPES = {
+    "pitcher_strikeouts":   "Pitcher Strikeouts",
+    "pitcher_earned_runs":  "Pitcher Earned Runs",
+    "pitcher_walks":        "Pitcher Walks",
+    "batter_hits":          "Hits",
+    "batter_home_runs":     "Home Runs",
+    "batter_rbis":          "RBIs",
+    "batter_runs_scored":   "Runs",
+    "batter_total_bases":   "Total Bases",
+    "batter_stolen_bases":  "Stolen Bases",
+    "batter_hits_runs_rbis":"Hits+Runs+RBIs",
+}
+
+def _seconds_until_midnight_cdt() -> float:
+    """Seconds from now until 12:05 AM CDT (gives MLB Stats API time to post final boxscores)."""
+    now = datetime.datetime.now(tz=_CDT)
+    next_run = (now + datetime.timedelta(days=1)).replace(
+        hour=0, minute=5, second=0, microsecond=0
+    )
+    return max((next_run - now).total_seconds(), 0)
+
+
+async def _nightly_resolve_loop():
+    """Background task: auto-resolve picks every night at 12:05 AM CDT."""
+    while True:
+        wait = _seconds_until_midnight_cdt()
+        await asyncio.sleep(wait)
+        try:
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, _do_resolve)
+        except Exception:
+            pass
+
+
+def _do_resolve():
+    """Synchronous resolve logic — called from the background task and the HTTP endpoint."""
+    from data.mlb_stats import get_game_log, add_derived_stats
+
+    unresolved = _db.get_picks(unresolved_only=True, past_only=True)
+    resolved = failed = skipped = 0
+
+    for pick in unresolved:
+        try:
+            target = datetime.date.fromisoformat(pick["date"])
+            group  = pick["group_type"]
+            stat   = pick["stat_col"]
+
+            df = get_game_log(pick["player"], season=target.year, group=group)
+            if df.empty:
+                failed += 1
+                continue
+
+            df = add_derived_stats(df, stat)
+            if stat not in df.columns:
+                failed += 1
+                continue
+
+            df["date"] = _pd.to_datetime(df["date"])
+            game = df[df["date"].dt.date == target]
+            if game.empty:
+                skipped += 1
+                continue
+
+            actual = float(game[stat].iloc[0])
+            lean   = pick["lean"]
+            line   = pick["line"]
+            hit    = 1 if (lean == "OVER" and actual > line) or \
+                          (lean == "UNDER" and actual < line) else 0
+            _db.resolve_pick(pick["id"], actual, hit)
+            resolved += 1
+        except Exception:
+            failed += 1
+
+    return {"resolved": resolved, "skipped": skipped, "failed": failed}
+
+
+@asynccontextmanager
+async def lifespan(app):
+    task = asyncio.create_task(_nightly_resolve_loop())
+    yield
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+
+app = FastAPI(title="MLB Props Model", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 # All Odds API markets mapped to internal stat/group config
@@ -262,6 +363,11 @@ def api_batch(markets: str = "pitcher_strikeouts", refresh: bool = False):
     try:
         results = _batch_scan(keys)
         _cache_set(cache_key, results)
+        # Auto-snapshot today's projections into the tracker DB
+        try:
+            _db.save_picks(results)
+        except Exception:
+            pass
         return {"results": results, "count": len(results), "cached": False}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -316,6 +422,71 @@ def api_project(body: ProjectRequest):
         raise HTTPException(status_code=400, detail=str(e))
 
 
+# ── Picks tracker ─────────────────────────────────────────────────────────────
+
+@app.get("/api/picks")
+def get_picks(date: str = None):
+    """Return all saved picks, optionally filtered to a specific date (YYYY-MM-DD)."""
+    return {"picks": _db.get_picks(date=date)}
+
+
+@app.get("/api/picks/stats")
+def picks_stats():
+    """Calibration summary: win rate by edge tier and by market."""
+    return _db.get_stats()
+
+
+@app.get("/api/calibration")
+def get_calibration():
+    """Per-stat projection bias learned from historical picks."""
+    return _db.get_calibration_data(min_samples=30)
+
+
+class SavePicksRequest(BaseModel):
+    results: list
+    date: Optional[str] = None
+
+
+@app.post("/api/picks/save")
+def save_picks(body: SavePicksRequest):
+    """Snapshot the current board results into the database."""
+    result = _db.save_picks(body.results, date=body.date)
+    return result
+
+
+class ResolveManualRequest(BaseModel):
+    pick_id: int
+    actual: float
+
+
+@app.post("/api/picks/resolve-manual")
+def resolve_manual(body: ResolveManualRequest):
+    """Manually set the actual value for a pick."""
+    ok = _db.manual_resolve(body.pick_id, body.actual)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Pick not found")
+    return {"ok": True}
+
+
+@app.post("/api/picks/resolve")
+def resolve_picks():
+    """Auto-resolve unresolved picks from past dates using actual MLB stats."""
+    return _do_resolve()
+
+
+@app.post("/api/picks/{pick_id}/unresolve")
+def unresolve_pick(pick_id: int):
+    """Clear the actual/hit values so a pick can be re-entered."""
+    _db.unresolve_pick(pick_id)
+    return {"ok": True}
+
+
+@app.delete("/api/picks/{pick_id}")
+def delete_pick(pick_id: int):
+    _db.delete_pick(pick_id)
+    return {"ok": True}
+
+
 # ── Batch engine ──────────────────────────────────────────────────────────────
 
 def _silence(fn, *args, **kwargs):
@@ -332,6 +503,15 @@ def _batch_scan(market_keys: list, pp_assume_round: bool = True) -> list:
         return []
 
     schedule_map = _silence(_build_pitcher_opponent_map)
+
+    # Try to pull real PrizePicks lines for each market — returns {} if blocked
+    pp_by_market: dict = {}
+    for mkey in market_keys:
+        stat_type = PP_STAT_TYPES.get(mkey)
+        if stat_type:
+            pp_by_market[mkey] = _silence(_fetch_pp_lines, stat_type)
+        else:
+            pp_by_market[mkey] = {}
 
     # One API call per event fetching ALL requested markets at once
     entries: dict = {}  # (player_name, market_key) -> data
@@ -398,9 +578,20 @@ def _batch_scan(market_keys: list, pp_assume_round: bool = True) -> list:
         book_probs = compute_probs(final_mean, eff_std, book_line, use_poisson=use_poisson)
         market_edge = round((book_probs["p_over"] - market_fair_prob) * 100, 1)
 
-        pp_line = round(book_line) if pp_assume_round else book_line
-        pp_probs = compute_probs(final_mean, eff_std, pp_line, use_poisson=use_poisson)
-        pp_edge = round((pp_probs["effective_over_rate"] - 0.5) * 100, 1)
+        # Real PP line > estimated round > null (user enters manually)
+        real_pp = _match_pp_line(player_name, pp_by_market.get(mkey, {}))
+        if real_pp is not None:
+            pp_line   = real_pp
+            pp_source = "prizepicks"
+        else:
+            pp_line   = None   # frontend will show editable input
+            pp_source = "manual"
+
+        if pp_line is not None:
+            pp_probs = compute_probs(final_mean, eff_std, pp_line, use_poisson=use_poisson)
+            pp_edge  = round((pp_probs["effective_over_rate"] - 0.5) * 100, 1)
+        else:
+            pp_edge  = None
 
         results.append({
             "player":               player_name,
@@ -413,11 +604,13 @@ def _batch_scan(market_keys: list, pp_assume_round: bool = True) -> list:
             "group":                data["group"],
             "line":                 book_line,
             "pp_line":              pp_line,
+            "pp_source":            pp_source,
             "projection":           round(final_mean, 2),
+            "eff_std":              round(eff_std, 3),
+            "use_poisson":          use_poisson,
             "model_prob_over":      round(book_probs["p_over"], 3),
             "market_fair_prob":     round(market_fair_prob, 3),
             "market_edge":          market_edge,
-            "pp_effective_over_rate": round(pp_probs["effective_over_rate"], 3),
             "pp_edge":              pp_edge,
             "abs_market_edge":      abs(market_edge),
             "n_books":              market_data["n_books"],

@@ -256,6 +256,7 @@ tr.xr { position: relative; z-index: 0; }
   <div class="tabs">
     <button class="tab active" data-tab="board" onclick="switchTab(this)">Today's Board</button>
     <button class="tab" data-tab="single" onclick="switchTab(this)">Single Player</button>
+    <button class="tab" data-tab="tracker" onclick="switchTab(this)">Tracker</button>
   </div>
   <div class="header-end">
     <span class="updated" id="updatedAt"></span>
@@ -393,6 +394,71 @@ tr.xr { position: relative; z-index: 0; }
 
   </div>
 
+  <!-- ── TRACKER ── -->
+  <div class="page" id="page-tracker">
+
+    <div class="controls" style="align-items:center;">
+      <div class="ctl">
+        <span class="ctl-label">Date</span>
+        <div style="display:flex;align-items:center;gap:4px;">
+          <button class="btn btn-ghost" style="padding:5px 10px;font-size:15px;line-height:1;" onclick="shiftTrackerDate(-1)" title="Previous day">&#8592;</button>
+          <input type="date" id="tkDateFilter" style="background:var(--surface2);border:1px solid var(--border2);color:var(--text);padding:6px 10px;border-radius:var(--r-sm);font:inherit;font-size:13px;" onchange="loadTracker()">
+          <button class="btn btn-ghost" style="padding:5px 10px;font-size:15px;line-height:1;" onclick="shiftTrackerDate(1)" title="Next day">&#8594;</button>
+          <button class="btn btn-ghost" style="padding:5px 10px;font-size:12px;" onclick="clearTrackerDate()" title="Show all dates">All</button>
+        </div>
+      </div>
+      <div class="ctl">
+        <span class="ctl-label">Show</span>
+        <select id="tkShowFilter" onchange="loadTracker()" style="min-width:130px;">
+          <option value="all">All picks</option>
+          <option value="pending">Pending</option>
+          <option value="resolved">Resolved</option>
+        </select>
+      </div>
+      <div style="margin-left:auto;display:flex;gap:8px;">
+        <span id="tkNextResolve" style="font-size:11px;color:var(--text-muted);align-self:center;"></span>
+        <button class="btn btn-ghost" onclick="resolveAll()" id="resolveBtn">Auto-Resolve Past</button>
+      </div>
+    </div>
+
+    <!-- Calibration summary -->
+    <div id="tkStats" style="display:none;margin-bottom:var(--sp-lg);">
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:var(--sp-md);">
+        <div id="tkOverall" class="surface2" style="background:var(--surface2);border:1px solid var(--border2);border-radius:var(--r);padding:var(--sp-md);">
+          <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;">Overall</div>
+          <div id="tkOverallVal" style="font-size:24px;font-weight:700;font-family:var(--mono);"></div>
+          <div id="tkOverallSub" style="font-size:12px;color:var(--text-dim);margin-top:2px;"></div>
+        </div>
+        <div id="tk10pp" style="background:var(--surface2);border:1px solid var(--border2);border-radius:var(--r);padding:var(--sp-md);">
+          <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;">10-15pp edge</div>
+          <div id="tk10Val" style="font-size:24px;font-weight:700;font-family:var(--mono);"></div>
+          <div id="tk10Sub" style="font-size:12px;color:var(--text-dim);margin-top:2px;"></div>
+        </div>
+        <div style="background:var(--surface2);border:1px solid var(--border2);border-radius:var(--r);padding:var(--sp-md);">
+          <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;">15-20pp edge</div>
+          <div id="tk15Val" style="font-size:24px;font-weight:700;font-family:var(--mono);"></div>
+          <div id="tk15Sub" style="font-size:12px;color:var(--text-dim);margin-top:2px;"></div>
+        </div>
+        <div style="background:var(--surface2);border:1px solid var(--border2);border-radius:var(--r);padding:var(--sp-md);">
+          <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;">20pp+ edge</div>
+          <div id="tk20Val" style="font-size:24px;font-weight:700;font-family:var(--mono);"></div>
+          <div id="tk20Sub" style="font-size:12px;color:var(--text-dim);margin-top:2px;"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Model calibration learned from pick history -->
+    <div id="tkCalSection" style="display:none;margin-bottom:var(--sp-lg);">
+      <div style="font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--text-muted);margin-bottom:10px;">
+        Model Calibration — learned from pick history
+      </div>
+      <div id="tkCalTable"></div>
+    </div>
+
+    <div id="tkArea"><div class="loading"><div class="spinner"></div>Loading picks…</div></div>
+
+  </div>
+
 </main>
 
 <script>
@@ -426,6 +492,7 @@ function switchTab(btn) {
   const tab = btn.dataset.tab;
   document.getElementById('page-' + tab).classList.add('active');
   if (tab === 'single') initSingle();
+  if (tab === 'tracker') loadTracker();
 }
 
 // ── Board ─────────────────────────────────────────────────────────────────────
@@ -519,18 +586,17 @@ function renderBoard(rows) {
   }
 
   const colDefs = [
-    { key: 'player',               label: 'Player' },
-    { key: 'market',               label: 'Stat' },
-    { key: 'opponent',             label: 'vs' },
-    { key: 'line',                 label: 'Line' },
-    { key: 'projection',           label: 'Proj' },
-    { key: 'model_prob_over',      label: 'Mdl%' },
-    { key: 'market_fair_prob',     label: 'Mkt%' },
-    { key: 'market_edge',          label: 'Edge' },
-    { key: 'pp_line',              label: 'PP~' },
-    { key: 'pp_effective_over_rate', label: 'Eff%' },
-    { key: 'pp_edge',              label: 'PP Edge' },
-    { key: 'lean',                 label: 'Lean' },
+    { key: 'player',          label: 'Player' },
+    { key: 'market',          label: 'Stat' },
+    { key: 'opponent',        label: 'vs' },
+    { key: 'line',            label: 'Line' },
+    { key: 'projection',      label: 'Proj' },
+    { key: 'model_prob_over', label: 'Mdl%' },
+    { key: 'market_fair_prob',label: 'Mkt%' },
+    { key: 'market_edge',     label: 'Edge' },
+    { key: 'pp_line',         label: 'PP Line' },
+    { key: 'pp_edge',         label: 'PP Edge' },
+    { key: 'lean',            label: 'Lean' },
   ];
 
   const sortK = document.getElementById('sortSel').value;
@@ -540,14 +606,36 @@ function renderBoard(rows) {
     return `<th class="${active ? 'sorted' : ''}">${c.label}<span class="si">${active ? '↓' : '↕'}</span></th>`;
   }).join('') + '</tr>';
 
-  const tbody = rows.map((r, i) => {
-    const delay = Math.min(i * 0.015, 0.3).toFixed(3);
+  const tbody = rows.map((r, ri) => {
+    const delay  = Math.min(ri * 0.015, 0.3).toFixed(3);
     const leanCls = r.lean === 'OVER' ? 'lean-over' : 'lean-under';
     const adjHtml = r.adjustments.map(a => {
       const isData = a.startsWith('[data]');
       const text = a.replace('[data] ', '').replace('[pitch-count adj] ', '');
       return `<li class="${isData ? 'is-data' : 'is-adj'}">${text}</li>`;
     }).join('');
+
+    const uid = `pp-${ri}`;
+
+    // PP line cell — show real value (labelled PP) or editable input
+    const ppLineCell = r.pp_source === 'prizepicks'
+      ? `<span style="font-family:var(--mono)">${r.pp_line}
+           <span style="font-size:10px;color:var(--green);margin-left:3px;">PP</span>
+         </span>`
+      : `<input id="${uid}" type="number" step="0.5" placeholder="enter"
+           style="width:58px;background:var(--surface2);border:1px solid var(--border2);
+                  color:var(--text);padding:3px 6px;border-radius:var(--r-sm);
+                  font:inherit;font-size:12px;font-family:var(--mono);"
+           onclick="event.stopPropagation()"
+           oninput="calcBoardPpEdge('${uid}',${ri})"
+           value="${r.pp_line !== null ? r.pp_line : ''}">`;
+
+    // PP edge cell — chip if known, dash if pending input
+    const ppEdgeCell = (r.pp_edge !== null && r.pp_edge !== undefined)
+      ? `<span class="chip ${chipClass(r.pp_edge)}" id="${uid}-edge">
+           ${r.pp_edge > 0 ? '+' : ''}${r.pp_edge.toFixed(1)} pp
+         </span>`
+      : `<span id="${uid}-edge" style="color:var(--text-muted);font-size:12px;">—</span>`;
 
     return `
       <tr class="dr" style="animation-delay:${delay}s" onclick="toggleDetail(this)">
@@ -559,9 +647,8 @@ function renderBoard(rows) {
         <td style="font-family:var(--mono)">${(r.model_prob_over * 100).toFixed(1)}%</td>
         <td style="font-family:var(--mono)">${(r.market_fair_prob * 100).toFixed(1)}%</td>
         <td><span class="chip ${chipClass(r.market_edge)}">${r.market_edge > 0 ? '+' : ''}${r.market_edge.toFixed(1)} pp</span></td>
-        <td style="font-family:var(--mono);color:var(--text-dim)">${r.pp_line.toFixed(0)}</td>
-        <td style="font-family:var(--mono)">${(r.pp_effective_over_rate * 100).toFixed(1)}%</td>
-        <td><span class="chip ${chipClass(r.pp_edge)}">${r.pp_edge > 0 ? '+' : ''}${r.pp_edge.toFixed(1)} pp</span></td>
+        <td>${ppLineCell}</td>
+        <td>${ppEdgeCell}</td>
         <td class="${leanCls}">${r.lean}</td>
       </tr>
       <tr class="xr"><td colspan="${colDefs.length}">
@@ -601,10 +688,10 @@ async function initSingle() {
       .map(r => ({
         name:      r.player,
         group:     r.group,
-        event_id:  '',       // filled in after /api/players loads
-        home_team: '',
-        away_team: '',
-        opponent:  r.opponent,
+        event_id:  r.event_id  || '',
+        home_team: r.home_team || '',
+        away_team: r.away_team || '',
+        opponent:  r.opponent  || '',
       }));
   }
 
@@ -763,6 +850,16 @@ async function runSingle() {
   const source   = document.getElementById('spSource').value;
   const pp_line  = parseFloat(document.getElementById('spPpLine').value) || null;
 
+  if (!event_id && player) {
+    // Fallback: look up from the loaded player list in case the patch didn't fire yet
+    const found = _allPlayers.find(x => x.name === player && x.event_id);
+    if (found) {
+      event_id = found.event_id;
+      document.getElementById('spEventId').value = event_id;
+      if (!document.getElementById('spOpponent').value && found.opponent)
+        document.getElementById('spOpponent').value = found.opponent;
+    }
+  }
   if (!player || !event_id) {
     document.getElementById('spResult').innerHTML =
       '<div class="err">Select a player from the dropdown first.</div>';
@@ -906,11 +1003,314 @@ function renderSingleResult(r) {
     </div>`;
 }
 
+// ── Tracker ───────────────────────────────────────────────────────────────────
+
+function shiftTrackerDate(delta) {
+  const input = document.getElementById('tkDateFilter');
+  const base  = input.value
+    ? new Date(input.value + 'T12:00:00')   // noon to avoid DST edge cases
+    : new Date();
+  base.setDate(base.getDate() + delta);
+  input.value = base.toISOString().slice(0, 10);
+  loadTracker();
+}
+
+function clearTrackerDate() {
+  document.getElementById('tkDateFilter').value = '';
+  loadTracker();
+}
+
+function _updateNextResolveLabel() {
+  // Show how long until the 12:05 AM CDT nightly auto-resolve
+  const now    = new Date();
+  const cdtOff = -5 * 60;                  // CDT = UTC-5
+  const nowCDT = new Date(now.getTime() + (now.getTimezoneOffset() + cdtOff) * 60000);
+  const next   = new Date(nowCDT);
+  next.setDate(next.getDate() + 1);
+  next.setHours(0, 5, 0, 0);
+  const diff   = Math.max(0, next - nowCDT);
+  const h      = Math.floor(diff / 3600000);
+  const m      = Math.floor((diff % 3600000) / 60000);
+  const label  = document.getElementById('tkNextResolve');
+  if (label) label.textContent = `Auto-resolve in ${h}h ${m}m`;
+}
+
+async function loadTracker() {
+  _updateNextResolveLabel();
+  const date  = document.getElementById('tkDateFilter').value || '';
+  const show  = document.getElementById('tkShowFilter').value;
+
+  document.getElementById('tkArea').innerHTML =
+    '<div class="loading"><div class="spinner"></div>Loading picks…</div>';
+
+  try {
+    const [picksRes, statsRes, calRes] = await Promise.all([
+      fetch('/api/picks' + (date ? '?date=' + date : '')),
+      fetch('/api/picks/stats'),
+      fetch('/api/calibration'),
+    ]);
+    const { picks } = await picksRes.json();
+    const stats = await statsRes.json();
+    const calData = await calRes.json();
+
+    renderTrackerStats(stats);
+    renderCalibration(calData);
+
+    let filtered = picks;
+    if (show === 'pending')  filtered = picks.filter(p => p.hit === null || p.hit === undefined);
+    if (show === 'resolved') filtered = picks.filter(p => p.hit !== null && p.hit !== undefined);
+
+    if (!filtered.length) {
+      document.getElementById('tkArea').innerHTML =
+        '<div class="empty">No picks found. Load the board to save today\'s projections automatically.</div>';
+      return;
+    }
+
+    renderTrackerTable(filtered);
+  } catch (e) {
+    document.getElementById('tkArea').innerHTML = `<div class="err">⚠ ${e.message}</div>`;
+  }
+}
+
+function renderCalibration(data) {
+  const sec = document.getElementById('tkCalSection');
+  const tbl = document.getElementById('tkCalTable');
+
+  const entries = Object.entries(data || {});
+  if (!entries.length) { sec.style.display = 'none'; return; }
+  sec.style.display = 'block';
+
+  const STAT_LABEL = {
+    strikeOuts: 'Pitcher Ks', hits: 'Hits', runs: 'Runs', rbi: 'RBI',
+    hitsRunsRbi: 'H+R+RBI', homeRuns: 'HR', stolenBases: 'SB',
+    strikeouts_b: 'Batter Ks', walks: 'BB',
+  };
+
+  const rows = entries.map(([stat, c]) => {
+    const biasDir  = c.bias > 0.05 ? 'OVER-projects' : c.bias < -0.05 ? 'UNDER-projects' : 'Accurate';
+    const biasCol  = c.bias > 0.05 ? 'var(--red)' : c.bias < -0.05 ? 'var(--green)' : 'var(--text-muted)';
+    const corrSign = c.bias > 0 ? '−' : '+';
+    const corrAmt  = Math.abs(c.bias).toFixed(3);
+    const calColor = c.cal_ratio < 0.9 ? 'var(--red)' : c.cal_ratio > 1.1 ? 'var(--green)' : 'var(--text-muted)';
+    const hrPct    = (c.actual_hit_rate * 100).toFixed(1);
+    const exPct    = (c.expected_hit_rate * 100).toFixed(1);
+    const label    = STAT_LABEL[stat] || stat;
+
+    return `<tr class="dr">
+      <td style="font-weight:500;">${label}</td>
+      <td style="color:var(--text-muted);font-size:12px;">${c.group_type}</td>
+      <td style="font-family:var(--mono);text-align:right;">${c.n}</td>
+      <td style="color:${biasCol};font-size:12px;">${biasDir}</td>
+      <td style="font-family:var(--mono);text-align:right;">
+        ${c.bias > 0.05 || c.bias < -0.05
+          ? `<span style="color:${biasCol}">${corrSign}${corrAmt}</span>`
+          : '<span style="color:var(--text-muted)">none</span>'}
+      </td>
+      <td style="font-family:var(--mono);text-align:right;">${c.avg_proj.toFixed(2)}</td>
+      <td style="font-family:var(--mono);text-align:right;">${c.avg_actual.toFixed(2)}</td>
+      <td style="font-family:var(--mono);text-align:right;">
+        ${hrPct}% <span style="color:var(--text-muted);font-size:11px;">/ ${exPct}%</span>
+      </td>
+      <td style="font-family:var(--mono);text-align:right;color:${calColor};">${c.cal_ratio.toFixed(2)}×</td>
+    </tr>`;
+  }).join('');
+
+  tbl.innerHTML = `
+    <div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th>Stat</th><th>Group</th><th style="text-align:right;">N</th>
+          <th>Bias</th><th style="text-align:right;">Correction</th>
+          <th style="text-align:right;">Avg Proj</th><th style="text-align:right;">Avg Actual</th>
+          <th style="text-align:right;">Hit% / Expected%</th>
+          <th style="text-align:right;">Conf. Ratio</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+    <div style="font-size:11px;color:var(--text-muted);margin-top:6px;">
+      Correction = bias applied to future projections (requires ≥30 resolved picks).
+      Conf. ratio &lt;1.0 = model overconfident; &gt;1.0 = underconfident.
+    </div>`;
+}
+
+function renderTrackerStats(stats) {
+  const box = document.getElementById('tkStats');
+  if (!stats.overall || !stats.overall.total) { box.style.display = 'none'; return; }
+  box.style.display = 'block';
+
+  function pct(w, t) { return t ? Math.round(w / t * 100) : null; }
+  function fill(idVal, idSub, wins, total) {
+    const p = pct(wins, total);
+    const el = document.getElementById(idVal);
+    el.textContent = p !== null ? p + '%' : '—';
+    el.style.color = p >= 55 ? 'var(--green)' : p >= 50 ? 'var(--text)' : p !== null ? 'var(--red)' : 'var(--text-muted)';
+    document.getElementById(idSub).textContent = total ? `${wins}W – ${total - wins}L (${total} picks)` : 'No data';
+  }
+
+  const o = stats.overall;
+  fill('tkOverallVal', 'tkOverallSub', o.wins || 0, o.total || 0);
+
+  const byTier = {};
+  (stats.tiers || []).forEach(t => { byTier[t.tier] = t; });
+  fill('tk10Val',  'tk10Sub',  byTier['10-15pp']?.wins||0, byTier['10-15pp']?.total||0);
+  fill('tk15Val',  'tk15Sub',  byTier['15-20pp']?.wins||0, byTier['15-20pp']?.total||0);
+  fill('tk20Val',  'tk20Sub',  byTier['20pp+']?.wins||0,   byTier['20pp+']?.total||0);
+}
+
+function renderTrackerTable(picks) {
+  const rows = picks.map(p => {
+    const resolved  = p.hit !== null && p.hit !== undefined;
+    const hitBadge  = resolved
+      ? (p.hit ? '<span style="color:var(--green);font-weight:600;">HIT</span>'
+                : '<span style="color:var(--red);font-weight:600;">MISS</span>')
+      : '<span style="color:var(--text-muted);">Pending</span>';
+    const actualStr = resolved ? p.actual?.toFixed(1) : '—';
+    const edgeColor = Math.abs(p.edge) >= 15 ? 'var(--green)' : 'var(--text-dim)';
+    const leanColor = p.lean === 'OVER' ? 'var(--green)' : 'var(--red)';
+
+    const manualInput = !resolved
+      ? `<span style="display:inline-flex;gap:4px;align-items:center;">
+           <input type="number" step="0.5" placeholder="actual"
+             style="width:64px;background:var(--surface2);border:1px solid var(--border2);color:var(--text);padding:3px 6px;border-radius:var(--r-sm);font:inherit;font-size:12px;"
+             id="act-${p.id}">
+           <button class="btn btn-ghost" style="padding:3px 8px;font-size:11px;"
+             onclick="submitActual(${p.id})">Save</button>
+           <button class="btn btn-ghost" style="padding:3px 6px;font-size:11px;color:var(--text-muted);"
+             title="Delete pick" onclick="deletePick(${p.id})">✕</button>
+         </span>`
+      : `<span style="display:inline-flex;gap:4px;align-items:center;">
+           <button class="btn btn-ghost" style="padding:3px 8px;font-size:11px;color:var(--text-muted);"
+             title="Clear result — re-enter value" onclick="unresolvePick(${p.id})">Clear</button>
+         </span>`;
+
+    return `<tr class="dr">
+      <td style="color:var(--text-muted);font-size:12px;">${p.date}</td>
+      <td style="font-weight:500;">${p.player}</td>
+      <td style="color:var(--text-dim);font-size:12px;">${p.market}</td>
+      <td style="font-family:var(--mono);">vs ${p.opponent}</td>
+      <td style="font-family:var(--mono);text-align:right;">${p.line?.toFixed(1)}</td>
+      <td style="font-family:var(--mono);text-align:right;">${p.projection?.toFixed(2)}</td>
+      <td style="font-family:var(--mono);text-align:right;color:${edgeColor};">${p.edge > 0 ? '+' : ''}${p.edge?.toFixed(1)}</td>
+      <td style="color:${leanColor};font-weight:600;font-size:12px;">${p.lean}</td>
+      <td style="font-family:var(--mono);text-align:right;">${actualStr}</td>
+      <td>${hitBadge}</td>
+      <td>${manualInput}</td>
+    </tr>`;
+  }).join('');
+
+  document.getElementById('tkArea').innerHTML = `
+    <div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th>Date</th><th>Player</th><th>Market</th><th>Opponent</th>
+          <th style="text-align:right;">Line</th>
+          <th style="text-align:right;">Proj</th>
+          <th style="text-align:right;">Edge</th>
+          <th>Lean</th>
+          <th style="text-align:right;">Actual</th>
+          <th>Result</th>
+          <th>Enter</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+}
+
+async function submitActual(pickId) {
+  const val = parseFloat(document.getElementById('act-' + pickId).value);
+  if (isNaN(val)) return;
+  await fetch('/api/picks/resolve-manual', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ pick_id: pickId, actual: val }),
+  });
+  loadTracker();
+}
+
+async function unresolvePick(pickId) {
+  await fetch('/api/picks/' + pickId + '/unresolve', { method: 'POST' });
+  loadTracker();
+}
+
+async function deletePick(pickId) {
+  await fetch('/api/picks/' + pickId, { method: 'DELETE' });
+  loadTracker();
+}
+
+async function resolveAll() {
+  const btn = document.getElementById('resolveBtn');
+  btn.disabled = true; btn.textContent = 'Resolving…';
+  try {
+    const r = await fetch('/api/picks/resolve', { method: 'POST' });
+    const d = await r.json();
+    btn.textContent = `Done (${d.resolved} resolved)`;
+    loadTracker();
+    setTimeout(() => { btn.textContent = 'Auto-Resolve Past'; btn.disabled = false; }, 3000);
+  } catch (e) {
+    btn.textContent = 'Error'; btn.disabled = false;
+  }
+}
+
+// ── Client-side PP edge calculator ───────────────────────────────────────────
+
+function _poissonPmf(k, lambda) {
+  if (lambda <= 0) return k === 0 ? 1 : 0;
+  let logP = -lambda + k * Math.log(lambda);
+  for (let i = 1; i <= k; i++) logP -= Math.log(i);
+  return Math.exp(logP);
+}
+function _poissonCDF(k, lambda) {
+  let s = 0;
+  for (let i = 0; i <= k; i++) s += _poissonPmf(i, lambda);
+  return s;
+}
+function _normalCDF(z) {
+  const t = 1 / (1 + 0.2316419 * Math.abs(z));
+  const d = 0.3989422820 * Math.exp(-z * z / 2);
+  const p = d * t * (0.3193815 + t * (-0.3565638 + t * (1.7814779 + t * (-1.8212560 + t * 1.3302744))));
+  return z > 0 ? 1 - p : p;
+}
+
+function _ppEdge(projection, effStd, ppLine, usePoisson) {
+  const k = Math.floor(ppLine);
+  const isWhole = ppLine === k;
+  if (usePoisson) {
+    if (isWhole) {
+      const pOver  = 1 - _poissonCDF(k, projection);
+      const pUnder = _poissonCDF(k - 1, projection);
+      const dec    = pOver + pUnder;
+      return dec > 0 ? ((pOver / dec) - 0.5) * 100 : 0;
+    } else {
+      return (1 - _poissonCDF(k, projection) - 0.5) * 100;
+    }
+  } else {
+    const z = (ppLine - projection) / (effStd || 1);
+    return (1 - _normalCDF(z) - 0.5) * 100;
+  }
+}
+
+function calcBoardPpEdge(uid, rowIdx) {
+  const r    = _allRows[rowIdx];
+  const val  = parseFloat(document.getElementById(uid).value);
+  const cell = document.getElementById(uid + '-edge');
+  if (!cell) return;
+  if (isNaN(val) || val <= 0) {
+    cell.outerHTML = `<span id="${uid}-edge" style="color:var(--text-muted);font-size:12px;">—</span>`;
+    return;
+  }
+  const edge = _ppEdge(r.projection, r.eff_std, val, r.use_poisson);
+  const edgeStr = (edge > 0 ? '+' : '') + edge.toFixed(1) + ' pp';
+  cell.outerHTML = `<span class="chip ${chipClass(edge)}" id="${uid}-edge">${edgeStr}</span>`;
+}
+
 // ── Init ──────────────────────────────────────────────────────────────────────
 // Always start on pitcher strikeouts — don't let the browser autofill a stale selection
 document.getElementById('mktFilter').value = 'pitcher_strikeouts';
 document.getElementById('dirFilter').value = '';
 document.getElementById('edgeFilter').value = '10';
+document.getElementById('tkDateFilter').value = new Date().toISOString().slice(0, 10);
+setInterval(_updateNextResolveLabel, 60000);  // refresh countdown every minute
 loadBoard();
 </script>
 </body>

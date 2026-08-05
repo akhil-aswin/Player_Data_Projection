@@ -243,62 +243,89 @@ def pitcher_weighted_average(game_log: pd.DataFrame, stat_col: str,
     pitcher_era = None
     ip_std = None
 
-    if stat_col == "strikeOuts" and "inningsPitched" in df.columns:
-        def _ip_to_float(ip_str) -> float:
-            try:
-                parts = str(ip_str).split(".")
-                full = int(parts[0])
-                outs = int(parts[1]) if len(parts) > 1 else 0
-                return full + outs / 3.0
-            except Exception:
-                return 0.0
+    # ── ERA + IP context (all pitching stats) ───────────────────────────────
+    # Compute avg_ip and pitcher_era once, shared across all stat types.
+    # ERA tells us outing length tendency and performance volatility.
+    GOOD_ERA_THRESHOLD = 3.20
 
+    def _ip_to_float(ip_str) -> float:
+        try:
+            parts = str(ip_str).split(".")
+            full = int(parts[0])
+            outs = int(parts[1]) if len(parts) > 1 else 0
+            return full + outs / 3.0
+        except Exception:
+            return 0.0
+
+    if "inningsPitched" in df.columns:
         df["ip_dec"] = df["inningsPitched"].apply(_ip_to_float)
         valid_ip = df["ip_dec"] > 0
 
         if valid_ip.sum() >= 3:
-            w = df.loc[valid_ip, "day_weight"].to_numpy()
+            w       = df.loc[valid_ip, "day_weight"].to_numpy()
             ip_vals = df.loc[valid_ip, "ip_dec"].to_numpy()
+            avg_ip  = float(np.sum(ip_vals * w) / np.sum(w))
+            ip_std  = float(np.std(ip_vals))
 
-            # Per-start K/IP rate
-            df.loc[valid_ip, "k_per_ip"] = df.loc[valid_ip, stat_col] / df.loc[valid_ip, "ip_dec"]
-            k_rates = df.loc[valid_ip, "k_per_ip"].to_numpy()
-
-            avg_k_per_ip = float(np.sum(k_rates * w) / np.sum(w))
-            avg_ip       = float(np.sum(ip_vals * w) / np.sum(w))
-            ip_std       = float(np.std(ip_vals))
-
-            # Per-start ERA (earned runs * 9 / IP), weighted average
             if "earnedRuns" in df.columns:
                 df["er_num"] = pd.to_numeric(df["earnedRuns"], errors="coerce").fillna(0)
-                df.loc[valid_ip, "era_start"] = df.loc[valid_ip, "er_num"] * 9 / df.loc[valid_ip, "ip_dec"]
-                era_vals = df.loc[valid_ip, "era_start"].to_numpy()
+                df.loc[valid_ip, "era_start"] = (
+                    df.loc[valid_ip, "er_num"] * 9 / df.loc[valid_ip, "ip_dec"]
+                )
+                era_vals    = df.loc[valid_ip, "era_start"].to_numpy()
                 pitcher_era = float(np.sum(era_vals * w) / np.sum(w))
 
-                # High-ERA pitchers get pulled sooner — apply mild IP haircut
-                # capped at 10% max reduction so ERA alone doesn't tank the projection
+                # Symmetric ERA-IP adjustment applied to all stats that benefit
+                # from IP normalization (Ks and BBs). ER is excluded — its
+                # relationship with IP is circular (high ER caused the short
+                # outing), so normalizing ER by adjusted IP would inflate
+                # projections for bad starts.
                 if pitcher_era > LEAGUE_AVG_ERA:
-                    era_penalty = min(0.10, 0.05 * (pitcher_era - LEAGUE_AVG_ERA) / LEAGUE_AVG_ERA)
-                    avg_ip *= (1 - era_penalty)
+                    era_penalty = min(0.07, 0.04 * (pitcher_era - LEAGUE_AVG_ERA) / LEAGUE_AVG_ERA)
+                    adj_ip = avg_ip * (1 - era_penalty)
                     era_tag = (
                         f"ERA {pitcher_era:.2f} (lg avg {LEAGUE_AVG_ERA}) → "
-                        f"IP haircut -{era_penalty*100:.1f}% → expected {avg_ip:.1f} IP"
+                        f"IP haircut -{era_penalty*100:.1f}% → expected {adj_ip:.1f} IP"
+                    )
+                elif pitcher_era < GOOD_ERA_THRESHOLD:
+                    era_bonus = min(0.05, 0.03 * (GOOD_ERA_THRESHOLD - pitcher_era) / GOOD_ERA_THRESHOLD)
+                    adj_ip = avg_ip * (1 + era_bonus)
+                    era_tag = (
+                        f"ERA {pitcher_era:.2f} (lg avg {LEAGUE_AVG_ERA}) → "
+                        f"IP bonus +{era_bonus*100:.1f}% → expected {adj_ip:.1f} IP"
                     )
                 else:
+                    adj_ip  = avg_ip
                     era_tag = f"ERA {pitcher_era:.2f} (lg avg {LEAGUE_AVG_ERA}) — no IP adjustment"
+            else:
+                adj_ip = avg_ip
 
-            # Normalize each start's K to the (possibly ERA-adjusted) avg IP
-            df.loc[valid_ip, stat_col] = df.loc[valid_ip, "k_per_ip"] * avg_ip
-            ip_tag = f"{avg_k_per_ip:.2f} K/IP × {avg_ip:.1f} avg IP (σ={ip_std:.1f})"
+            # IP normalization for rate-based counting stats: Ks and BBs.
+            # Both are truncated by outing length; normalizing to rate × expected_IP
+            # removes the bias from short or extra-long starts.
+            # ER is intentionally excluded: high ER/IP × short IP would double-penalize
+            # an already-bad start, since the short outing was caused by the ER.
+            # Walks (BB) inverse note: high-ERA pitchers walk more per inning BUT also
+            # get pulled sooner — the IP normalization correctly captures both effects.
+            if stat_col in ("strikeOuts", "baseOnBalls"):
+                rate_col = f"{stat_col}_per_ip"
+                df.loc[valid_ip, rate_col] = (
+                    df.loc[valid_ip, stat_col] / df.loc[valid_ip, "ip_dec"]
+                )
+                rates       = df.loc[valid_ip, rate_col].to_numpy()
+                avg_rate    = float(np.sum(rates * w) / np.sum(w))
+                df.loc[valid_ip, stat_col] = df.loc[valid_ip, rate_col] * adj_ip
+                ip_tag = f"{avg_rate:.2f} {stat_col}/IP × {adj_ip:.1f} avg IP (σ={ip_std:.1f})"
 
     values = df[stat_col].to_numpy()
     weights = df["day_weight"].to_numpy()
 
-    recency_mean = float(np.sum(values * weights) / np.sum(weights))
+    recency_mean  = float(np.sum(values * weights) / np.sum(weights))
     baseline_mean = float(np.mean(values))
     weighted_mean = (1 - baseline_weight) * recency_mean + baseline_weight * baseline_mean
 
-    # Widen variance for high-ERA pitchers: they have more IP uncertainty
+    # Variance widening for high-ERA pitchers applies to ALL stats:
+    # ER, BB, and Ks are all more variable when a pitcher is struggling.
     weighted_var = float(np.sum(weights * (values - weighted_mean) ** 2) / np.sum(weights))
     if pitcher_era and pitcher_era > LEAGUE_AVG_ERA + 1.0:
         era_var_boost = min(0.25, 0.10 * (pitcher_era - LEAGUE_AVG_ERA) / LEAGUE_AVG_ERA)
