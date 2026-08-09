@@ -415,8 +415,10 @@ tr.xr { position: relative; z-index: 0; }
           <option value="resolved">Resolved</option>
         </select>
       </div>
-      <div style="margin-left:auto;display:flex;gap:8px;">
-        <span id="tkNextResolve" style="font-size:11px;color:var(--text-muted);align-self:center;"></span>
+      <div style="margin-left:auto;display:flex;gap:8px;align-items:center;">
+        <span id="tkNextProject" style="font-size:11px;color:var(--text-muted);"></span>
+        <button class="btn btn-ghost" onclick="autoProjectNow()" id="projectBtn">Project Now</button>
+        <span id="tkNextResolve" style="font-size:11px;color:var(--text-muted);"></span>
         <button class="btn btn-ghost" onclick="resolveAll()" id="resolveBtn">Auto-Resolve Past</button>
       </div>
     </div>
@@ -1021,18 +1023,43 @@ function clearTrackerDate() {
 }
 
 function _updateNextResolveLabel() {
-  // Show how long until the 12:05 AM CDT nightly auto-resolve
   const now    = new Date();
   const cdtOff = -5 * 60;                  // CDT = UTC-5
   const nowCDT = new Date(now.getTime() + (now.getTimezoneOffset() + cdtOff) * 60000);
-  const next   = new Date(nowCDT);
-  next.setDate(next.getDate() + 1);
-  next.setHours(0, 5, 0, 0);
-  const diff   = Math.max(0, next - nowCDT);
-  const h      = Math.floor(diff / 3600000);
-  const m      = Math.floor((diff % 3600000) / 60000);
-  const label  = document.getElementById('tkNextResolve');
-  if (label) label.textContent = `Auto-resolve in ${h}h ${m}m`;
+
+  // Next 12:05 AM CDT auto-resolve
+  const nextResolve = new Date(nowCDT);
+  nextResolve.setDate(nextResolve.getDate() + 1);
+  nextResolve.setHours(0, 5, 0, 0);
+  const diffR = Math.max(0, nextResolve - nowCDT);
+  const hR = Math.floor(diffR / 3600000), mR = Math.floor((diffR % 3600000) / 60000);
+  const resolveLabel = document.getElementById('tkNextResolve');
+  if (resolveLabel) resolveLabel.textContent = `Resolve in ${hR}h ${mR}m`;
+
+  // Next 10:30 AM CDT auto-project
+  const nextProject = new Date(nowCDT);
+  nextProject.setHours(10, 30, 0, 0);
+  if (nowCDT >= nextProject) nextProject.setDate(nextProject.getDate() + 1);
+  const diffP = Math.max(0, nextProject - nowCDT);
+  const hP = Math.floor(diffP / 3600000), mP = Math.floor((diffP % 3600000) / 60000);
+  const projectLabel = document.getElementById('tkNextProject');
+  if (projectLabel) projectLabel.textContent = `Auto-project in ${hP}h ${mP}m`;
+}
+
+async function autoProjectNow() {
+  const btn = document.getElementById('projectBtn');
+  btn.disabled = true;
+  btn.textContent = 'Running…';
+  try {
+    const r = await fetch('/api/auto-project/run', { method: 'POST' });
+    const d = await r.json();
+    btn.textContent = `Done (${d.projected} projected)`;
+    loadTracker();
+    setTimeout(() => { btn.textContent = 'Project Now'; btn.disabled = false; }, 4000);
+  } catch (e) {
+    btn.textContent = 'Error';
+    setTimeout(() => { btn.textContent = 'Project Now'; btn.disabled = false; }, 3000);
+  }
 }
 
 async function loadTracker() {

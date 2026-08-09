@@ -10,7 +10,8 @@ import sqlite3
 import datetime
 import os
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "picks.db")
+# On Railway: set DB_PATH=/data/picks.db (persistent volume). Defaults to local file.
+DB_PATH = os.environ.get("DB_PATH", os.path.join(os.path.dirname(__file__), "picks.db"))
 
 
 def _conn() -> sqlite3.Connection:

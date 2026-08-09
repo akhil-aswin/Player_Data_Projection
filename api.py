@@ -90,6 +90,15 @@ def _seconds_until_midnight_cdt() -> float:
     return max((next_run - now).total_seconds(), 0)
 
 
+def _seconds_until_morning_cdt(hour: int = 10, minute: int = 30) -> float:
+    """Seconds from now until the next 10:30 AM CDT (lines are reliably posted by then)."""
+    now = datetime.datetime.now(tz=_CDT)
+    target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if now >= target:
+        target += datetime.timedelta(days=1)
+    return max((target - now).total_seconds(), 0)
+
+
 async def _nightly_resolve_loop():
     """Background task: auto-resolve picks every night at 12:05 AM CDT."""
     while True:
@@ -98,6 +107,21 @@ async def _nightly_resolve_loop():
         try:
             loop = asyncio.get_event_loop()
             await loop.run_in_executor(None, _do_resolve)
+        except Exception:
+            pass
+
+
+_last_auto_project: dict = {"ran_at": None, "count": 0, "status": "never run"}
+
+
+async def _morning_project_loop():
+    """Background task: auto-run all market projections every morning at 10:30 AM CDT."""
+    while True:
+        wait = _seconds_until_morning_cdt()
+        await asyncio.sleep(wait)
+        try:
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, _do_auto_project)
         except Exception:
             pass
 
@@ -144,15 +168,41 @@ def _do_resolve():
     return {"resolved": resolved, "skipped": skipped, "failed": failed}
 
 
+def _do_auto_project() -> dict:
+    """Run all markets and snapshot projections to DB. Called by the morning loop and manually."""
+    global _last_auto_project
+    all_keys = list(MARKET_CONFIGS.keys())
+    try:
+        results = _silence(_batch_scan, all_keys)
+        if results:
+            _db.save_picks(results)
+        _last_auto_project = {
+            "ran_at": datetime.datetime.now(tz=_CDT).isoformat(),
+            "count":  len(results),
+            "status": "ok",
+        }
+        return {"projected": len(results)}
+    except Exception as e:
+        _last_auto_project = {
+            "ran_at": datetime.datetime.now(tz=_CDT).isoformat(),
+            "count":  0,
+            "status": f"error: {e}",
+        }
+        return {"projected": 0, "error": str(e)}
+
+
 @asynccontextmanager
 async def lifespan(app):
-    task = asyncio.create_task(_nightly_resolve_loop())
+    resolve_task = asyncio.create_task(_nightly_resolve_loop())
+    project_task = asyncio.create_task(_morning_project_loop())
     yield
-    task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        pass
+    resolve_task.cancel()
+    project_task.cancel()
+    for t in (resolve_task, project_task):
+        try:
+            await t
+        except asyncio.CancelledError:
+            pass
 
 
 app = FastAPI(title="MLB Props Model", lifespan=lifespan)
@@ -472,6 +522,24 @@ def resolve_manual(body: ResolveManualRequest):
 def resolve_picks():
     """Auto-resolve unresolved picks from past dates using actual MLB stats."""
     return _do_resolve()
+
+
+@app.get("/api/auto-project/status")
+def auto_project_status():
+    """Next scheduled auto-projection run time and last run summary."""
+    wait = _seconds_until_morning_cdt()
+    next_run = (datetime.datetime.now(tz=_CDT) + datetime.timedelta(seconds=wait))
+    return {
+        "next_run_cdt":  next_run.strftime("%Y-%m-%d %H:%M CDT"),
+        "seconds_until": int(wait),
+        "last_run":      _last_auto_project,
+    }
+
+
+@app.post("/api/auto-project/run")
+def run_auto_project():
+    """Manually trigger the morning projection run right now."""
+    return _do_auto_project()
 
 
 @app.post("/api/picks/{pick_id}/unresolve")
