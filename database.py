@@ -98,6 +98,56 @@ def save_picks(results: list, date: str = None) -> dict:
     return {"saved": saved, "skipped": skipped}
 
 
+def import_picks(rows: list) -> dict:
+    """
+    Import raw pick rows from another DB instance (e.g. local → Railway).
+    Inserts rows that don't exist yet (UNIQUE on date+player+market).
+    For newly inserted rows that are already resolved, also writes actual/hit.
+    For rows that already exist in Railway, fills in actual/hit only if still NULL.
+    """
+    inserted = updated = skipped = 0
+    now = datetime.datetime.utcnow().isoformat()
+
+    with _conn() as conn:
+        for r in rows:
+            try:
+                conn.execute("""
+                    INSERT OR IGNORE INTO picks
+                      (date, player, opponent, market, stat_col, group_type,
+                       line, projection, model_prob, market_prob, edge, lean,
+                       event_id, actual, hit, resolved_at, saved_at)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """, (
+                    r["date"], r["player"], r["opponent"], r["market"],
+                    r["stat_col"], r["group_type"], r["line"], r["projection"],
+                    r["model_prob"], r["market_prob"], r["edge"], r["lean"],
+                    r.get("event_id", ""),
+                    r.get("actual"), r.get("hit"), r.get("resolved_at"),
+                    r.get("saved_at") or now,
+                ))
+                if conn.execute("SELECT changes()").fetchone()[0]:
+                    inserted += 1
+                else:
+                    # Row already exists — backfill actual/hit if Railway doesn't have it yet
+                    if r.get("actual") is not None:
+                        conn.execute("""
+                            UPDATE picks SET actual=?, hit=?, resolved_at=?
+                            WHERE date=? AND player=? AND market=? AND actual IS NULL
+                        """, (r["actual"], r["hit"], r.get("resolved_at"),
+                              r["date"], r["player"], r["market"]))
+                        if conn.execute("SELECT changes()").fetchone()[0]:
+                            updated += 1
+                        else:
+                            skipped += 1
+                    else:
+                        skipped += 1
+            except Exception:
+                skipped += 1
+        conn.commit()
+
+    return {"inserted": inserted, "updated": updated, "skipped": skipped}
+
+
 def resolve_pick(pick_id: int, actual: float, hit: int):
     with _conn() as conn:
         conn.execute(

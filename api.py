@@ -549,6 +549,12 @@ def unresolve_pick(pick_id: int):
     return {"ok": True}
 
 
+@app.post("/api/picks/import")
+def import_picks(body: SavePicksRequest):
+    """Bulk-import raw pick rows from another DB instance (e.g. local → Railway)."""
+    return _db.import_picks(body.results)
+
+
 @app.delete("/api/picks/{pick_id}")
 def delete_pick(pick_id: int):
     _db.delete_pick(pick_id)
