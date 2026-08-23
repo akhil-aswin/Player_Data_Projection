@@ -96,6 +96,23 @@ MIN_STD = {
     "earnedRuns": 1.2, "baseOnBalls": 0.8, "hitsRunsRbi": 1.5,
 }
 
+# Minimum projection per stat — prevents 0.00 outputs when a player's recent
+# sample happens to be all-zeros (e.g. 0 stolen bases in last 20 games, or
+# IP normalization turning 0 K/start into 0.00 projected Ks).
+# Values represent a conservative floor for any player who has a prop listed.
+PROJ_FLOOR = {
+    "strikeOuts":  2.0,   # pitcher — even a weak arm strikes out ~2/start
+    "earnedRuns":  0.4,   # pitcher
+    "baseOnBalls": 0.3,   # pitcher — even elite control allows ~0.3 BB/start
+    "hits":        0.4,   # batter
+    "homeRuns":    0.05,  # batter — rare but never truly 0 expectation
+    "rbi":         0.3,   # batter
+    "runs":        0.3,   # batter
+    "totalBases":  0.4,   # batter
+    "stolenBases": 0.05,  # batter — non-stealers still occasionally run
+    "hitsRunsRbi": 0.6,   # batter (sum of three)
+}
+
 # All integer-count stats benefit from Poisson instead of Normal distribution.
 # Normal overestimates/underestimates probability near half-point lines for
 # discrete right-skewed stats (e.g. total bases: most games 0–1, spikes to 3–4).
@@ -328,6 +345,16 @@ def _build_projection(player_name: str, opponent: str,
                 f"expected {c['expected_hit_rate']*100:.0f}%)"
             )
             blended_mean = calibrated
+
+    # Projection floor — prevents 0.00 outputs from all-zero samples or
+    # calibration clamping a small mean down to 0.
+    floor = PROJ_FLOOR.get(stat_col, 0.0)
+    if blended_mean < floor:
+        adjustments.append(
+            f"[floor] projection {blended_mean:.2f} below minimum {floor} "
+            f"for {stat_col} — raised to floor"
+        )
+        blended_mean = floor
 
     return blended_mean, base_mean, base_stats, adjustments, data_source
 
