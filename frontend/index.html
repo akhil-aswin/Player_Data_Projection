@@ -1049,15 +1049,35 @@ function _updateNextResolveLabel() {
 async function autoProjectNow() {
   const btn = document.getElementById('projectBtn');
   btn.disabled = true;
-  btn.textContent = 'Running…';
+  btn.textContent = 'Starting…';
   try {
-    const r = await fetch('/api/auto-project/run', { method: 'POST' });
-    const d = await r.json();
-    btn.textContent = `Done (${d.projected} projected)`;
-    loadTracker();
-    setTimeout(() => { btn.textContent = 'Project Now'; btn.disabled = false; }, 4000);
+    const start = await fetch('/api/auto-project/run', { method: 'POST' });
+    const s = await start.json();
+    if (s.status === 'already_running') {
+      btn.textContent = 'Already running…';
+    } else {
+      btn.textContent = 'Running…';
+    }
+    // Poll status every 5 seconds until the run finishes
+    let elapsed = 0;
+    while (true) {
+      await new Promise(r => setTimeout(r, 5000));
+      elapsed += 5;
+      const r = await fetch('/api/auto-project/status');
+      const d = await r.json();
+      if (!d.running) {
+        const count = d.last_run && d.last_run.count != null ? d.last_run.count : '?';
+        const err   = d.last_run && d.last_run.status !== 'ok' ? ' ⚠' : '';
+        btn.textContent = `Done — ${count} projected${err}`;
+        loadTracker();
+        setTimeout(() => { btn.textContent = 'Project Now'; btn.disabled = false; }, 5000);
+        break;
+      }
+      const mins = Math.floor(elapsed / 60), secs = elapsed % 60;
+      btn.textContent = `Running… ${mins > 0 ? mins + 'm ' : ''}${secs}s`;
+    }
   } catch (e) {
-    btn.textContent = 'Error';
+    btn.textContent = 'Error — retry';
     setTimeout(() => { btn.textContent = 'Project Now'; btn.disabled = false; }, 3000);
   }
 }

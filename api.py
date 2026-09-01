@@ -111,7 +111,8 @@ async def _nightly_resolve_loop():
             pass
 
 
-_last_auto_project: dict = {"ran_at": None, "count": 0, "status": "never run"}
+_last_auto_project: dict  = {"ran_at": None, "count": 0, "status": "never run"}
+_auto_project_running: bool = False
 
 
 async def _morning_project_loop():
@@ -170,12 +171,17 @@ def _do_resolve():
 
 def _do_auto_project() -> dict:
     """Run all markets and snapshot projections to DB. Called by the morning loop and manually."""
-    global _last_auto_project
+    global _last_auto_project, _auto_project_running
     all_keys = list(MARKET_CONFIGS.keys())
     try:
         results = _silence(_batch_scan, all_keys)
         if results:
             _db.save_picks(results)
+            # Also push results into the server cache so the board reflects them immediately
+            for mkey in all_keys:
+                cache_key = "batch:" + ",".join(sorted(all_keys))
+                _cache_set(cache_key, results)
+            _cache_clear("players")  # force player list refresh too
         _last_auto_project = {
             "ran_at": datetime.datetime.now(tz=_CDT).isoformat(),
             "count":  len(results),
@@ -189,6 +195,8 @@ def _do_auto_project() -> dict:
             "status": f"error: {e}",
         }
         return {"projected": 0, "error": str(e)}
+    finally:
+        _auto_project_running = False
 
 
 @asynccontextmanager
@@ -526,20 +534,27 @@ def resolve_picks():
 
 @app.get("/api/auto-project/status")
 def auto_project_status():
-    """Next scheduled auto-projection run time and last run summary."""
+    """Next scheduled auto-projection run time, running state, and last run summary."""
     wait = _seconds_until_morning_cdt()
     next_run = (datetime.datetime.now(tz=_CDT) + datetime.timedelta(seconds=wait))
     return {
         "next_run_cdt":  next_run.strftime("%Y-%m-%d %H:%M CDT"),
         "seconds_until": int(wait),
+        "running":       _auto_project_running,
         "last_run":      _last_auto_project,
     }
 
 
 @app.post("/api/auto-project/run")
-def run_auto_project():
-    """Manually trigger the morning projection run right now."""
-    return _do_auto_project()
+async def run_auto_project():
+    """Kick off projection run as a background task — returns immediately."""
+    global _auto_project_running
+    if _auto_project_running:
+        return {"status": "already_running"}
+    _auto_project_running = True
+    loop = asyncio.get_event_loop()
+    loop.run_in_executor(None, _do_auto_project)
+    return {"status": "started"}
 
 
 @app.post("/api/picks/{pick_id}/unresolve")
