@@ -1,9 +1,8 @@
 [build]
-builder = "DOCKERFILE"
-buildArgs = {CACHEBUST = "20260901-a"}
+builder = "NIXPACKS"
 
 [deploy]
-startCommand = "uvicorn api:app --host 0.0.0.0 --port $PORT --log-level warning"
+startCommand = "sh -c 'uvicorn api:app --host 0.0.0.0 --port $PORT --log-level warning'"
 healthcheckPath = "/"
 healthcheckTimeout = 300
 restartPolicyType = "ON_FAILURE"
