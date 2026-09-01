@@ -576,6 +576,15 @@ def delete_pick(pick_id: int):
     return {"ok": True}
 
 
+@app.get("/api/version")
+def api_version():
+    """Build probe — returns a unique token so we can confirm which code Railway is running."""
+    return {"build": "v20260901-fixed", "features": ["proj_floor", "exact_name_match", "bg_task", "timer"]}
+
+
+
+
+
 # ── Batch engine ──────────────────────────────────────────────────────────────
 
 def _silence(fn, *args, **kwargs):
