@@ -41,6 +41,12 @@ def lookup_player(player_name: str) -> dict:
             "  - Try last name only to see all matches"
         )
     if len(results) > 1:
+        # Prefer exact full-name match so "Eduardo Rodriguez" doesn't
+        # resolve to "Bradgley Rodriguez" just because it sorts first.
+        target = player_name.strip().lower()
+        exact = [p for p in results if p.get("fullName", "").lower() == target]
+        if exact:
+            return exact[0]
         print(f"  Multiple matches for '{player_name}':")
         for p in results:
             print(f"    [{p['id']}] {p['fullName']}")
