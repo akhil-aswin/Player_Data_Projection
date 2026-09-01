@@ -271,13 +271,17 @@ def get_picks(date: str = None, unresolved_only: bool = False,
     return [dict(r) for r in rows]
 
 
-def get_stats() -> dict:
+def get_stats(since: str = None) -> dict:
     """
     Calibration stats broken down by edge tier.
     Returns overall + per-tier win rates for all resolved picks.
+    Optional `since` (YYYY-MM-DD) filters to picks on or after that date.
     """
+    date_clause = "AND date >= ?" if since else ""
+    params = (since,) if since else ()
+
     with _conn() as conn:
-        tiers = conn.execute("""
+        tiers = conn.execute(f"""
             SELECT
                 CASE
                     WHEN ABS(edge) >= 20 THEN '20pp+'
@@ -291,20 +295,20 @@ def get_stats() -> dict:
                 AVG(ABS(edge))    AS avg_edge,
                 MIN(ABS(edge))    AS min_edge
             FROM picks
-            WHERE hit IS NOT NULL
+            WHERE hit IS NOT NULL {date_clause}
             GROUP BY tier
-        """).fetchall()
+        """, params).fetchall()
 
-        overall = conn.execute("""
+        overall = conn.execute(f"""
             SELECT
                 COUNT(*)       AS total,
                 SUM(hit)       AS wins,
                 SUM(1 - hit)   AS losses
             FROM picks
-            WHERE hit IS NOT NULL
-        """).fetchone()
+            WHERE hit IS NOT NULL {date_clause}
+        """, params).fetchone()
 
-        by_market = conn.execute("""
+        by_market = conn.execute(f"""
             SELECT
                 market,
                 COUNT(*)       AS total,
@@ -312,10 +316,10 @@ def get_stats() -> dict:
                 SUM(1 - hit)   AS losses,
                 AVG(ABS(edge)) AS avg_edge
             FROM picks
-            WHERE hit IS NOT NULL
+            WHERE hit IS NOT NULL {date_clause}
             GROUP BY market
             ORDER BY total DESC
-        """).fetchall()
+        """, params).fetchall()
 
     return {
         "overall":   dict(overall) if overall else {},

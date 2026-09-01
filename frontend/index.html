@@ -415,6 +415,11 @@ tr.xr { position: relative; z-index: 0; }
           <option value="resolved">Resolved</option>
         </select>
       </div>
+      <div class="ctl">
+        <span class="ctl-label">Stats since</span>
+        <input type="date" id="tkStatsSince" style="background:var(--surface2);border:1px solid var(--border2);color:var(--text);padding:6px 10px;border-radius:var(--r-sm);font:inherit;font-size:13px;" onchange="loadTracker()" title="Filter accuracy stats to picks on or after this date">
+        <button class="btn btn-ghost" style="padding:5px 10px;font-size:12px;" onclick="document.getElementById('tkStatsSince').value='';loadTracker();" title="All time">All</button>
+      </div>
       <div style="margin-left:auto;display:flex;gap:8px;align-items:center;">
         <span id="tkNextProject" style="font-size:11px;color:var(--text-muted);"></span>
         <button class="btn btn-ghost" onclick="autoProjectNow()" id="projectBtn">Project Now</button>
@@ -425,6 +430,7 @@ tr.xr { position: relative; z-index: 0; }
 
     <!-- Calibration summary -->
     <div id="tkStats" style="display:none;margin-bottom:var(--sp-lg);">
+      <div id="tkStatsLabel" style="font-size:11px;color:var(--text-muted);margin-bottom:8px;"></div>
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:var(--sp-md);">
         <div id="tkOverall" class="surface2" style="background:var(--surface2);border:1px solid var(--border2);border-radius:var(--r);padding:var(--sp-md);">
           <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;">Overall</div>
@@ -1103,10 +1109,12 @@ async function loadTracker() {
   document.getElementById('tkArea').innerHTML =
     '<div class="loading"><div class="spinner"></div>Loading picks…</div>';
 
+  const statsSince = document.getElementById('tkStatsSince').value || '';
+
   try {
     const [picksRes, statsRes, calRes] = await Promise.all([
       fetch('/api/picks' + (date ? '?date=' + date : '')),
-      fetch('/api/picks/stats'),
+      fetch('/api/picks/stats' + (statsSince ? '?since=' + statsSince : '')),
       fetch('/api/calibration'),
     ]);
     const { picks } = await picksRes.json();
@@ -1198,6 +1206,11 @@ function renderTrackerStats(stats) {
   const box = document.getElementById('tkStats');
   if (!stats.overall || !stats.overall.total) { box.style.display = 'none'; return; }
   box.style.display = 'block';
+
+  const since = document.getElementById('tkStatsSince').value;
+  const label = document.getElementById('tkStatsLabel');
+  if (label) label.textContent = since ? `Accuracy since ${since}` : 'Accuracy — all time';
+
 
   function pct(w, t) { return t ? Math.round(w / t * 100) : null; }
   function fill(idVal, idSub, wins, total) {

@@ -489,9 +489,10 @@ def get_picks(date: str = None):
 
 
 @app.get("/api/picks/stats")
-def picks_stats():
-    """Calibration summary: win rate by edge tier and by market."""
-    return _db.get_stats()
+def picks_stats(since: str = None):
+    """Calibration summary: win rate by edge tier and by market.
+    Optional ?since=YYYY-MM-DD filters to picks on or after that date."""
+    return _db.get_stats(since=since)
 
 
 @app.get("/api/calibration")
