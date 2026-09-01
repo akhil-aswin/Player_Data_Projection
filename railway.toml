@@ -1,3 +1,7 @@
+[build]
+builder = "DOCKERFILE"
+buildArgs = {CACHEBUST = "20260901-a"}
+
 [deploy]
 startCommand = "uvicorn api:app --host 0.0.0.0 --port $PORT --log-level warning"
 healthcheckPath = "/"

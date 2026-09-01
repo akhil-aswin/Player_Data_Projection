@@ -1,4 +1,6 @@
 FROM python:3.12-slim
+ARG CACHEBUST=1
+RUN echo "$CACHEBUST" > /BUILDTIME
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
