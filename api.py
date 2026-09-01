@@ -578,8 +578,15 @@ def delete_pick(pick_id: int):
 
 @app.get("/api/version")
 def api_version():
-    """Build probe — returns a unique token so we can confirm which code Railway is running."""
-    return {"build": "v20260901-fixed", "features": ["proj_floor", "exact_name_match", "bg_task", "timer"]}
+    """Build probe — returns build token so we can confirm which code Railway is running."""
+    try:
+        bv = open("/app/BUILD_VERSION.txt").read().strip()
+    except Exception:
+        try:
+            bv = open("BUILD_VERSION.txt").read().strip()
+        except Exception:
+            bv = "missing"
+    return {"build": bv, "features": ["proj_floor", "exact_name_match", "bg_task", "timer"]}
 
 
 
